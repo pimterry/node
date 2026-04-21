@@ -3,6 +3,7 @@
 name: Test Shared libraries
 
 on:
+  workflow_dispatch:
   pull_request:
     paths-ignore:
       - '**.md'
