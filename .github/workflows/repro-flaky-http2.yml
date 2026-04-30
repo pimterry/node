@@ -1,0 +1,254 @@
+name: Repro test-http2-close-while-writing flake
+
+# Build Node once on macOS, then run the flaky test under several
+# variants and capture every diagnostic we might want — the build is
+# slow and we only get one shot per push.
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: 'Iterations per variant'
+        default: '20000'
+      timeout_seconds:
+        description: 'Per-iteration timeout (seconds)'
+        default: '15'
+      max_captures:
+        description: 'Max hangs/errors to capture per variant'
+        default: '10'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  ITER: ${{ github.event.inputs.iterations || '20000' }}
+  TIMEOUT_S: ${{ github.event.inputs.timeout_seconds || '15' }}
+  MAX_CAP: ${{ github.event.inputs.max_captures || '10' }}
+
+jobs:
+  repro:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15-intel, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 350
+    env:
+      CC: sccache gcc
+      CXX: sccache g++
+      SCCACHE_GHA_ENABLED: 'true'
+      SCCACHE_IDLE_TIMEOUT: '0'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: System info
+        run: |
+          echo "::group::uname / sw_vers"
+          uname -a
+          sw_vers
+          echo "::endgroup::"
+          echo "::group::CPU / memory"
+          sysctl -n machdep.cpu.brand_string || true
+          sysctl -n hw.ncpu hw.physicalcpu hw.logicalcpu || true
+          sysctl -n hw.memsize || true
+          echo "cores=$(getconf _NPROCESSORS_ONLN)"
+          echo "::endgroup::"
+          echo "::group::ulimit / network"
+          ulimit -a
+          sysctl net.inet.tcp.sendspace net.inet.tcp.recvspace || true
+          sysctl net.inet.tcp.delayed_ack || true
+          sysctl net.inet.tcp.mssdflt || true
+          sysctl net.local || true
+          echo "::endgroup::"
+          echo "::group::Available debugging tools"
+          which sample lldb lsof netstat vmmap
+          xcrun --version || true
+          xcode-select -p || true
+          echo "::endgroup::"
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Set up sccache
+        uses: Mozilla-Actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad  # v0.0.9
+        with:
+          version: v0.12.0
+
+      - name: Configure & build (release)
+        run: |
+          # Build optimized release. We rely on sample(1)/lldb working
+          # against an unstripped binary, so leave debug symbols on.
+          ./configure --ninja
+          # macOS runners usually have 3 cores; use them all.
+          ninja -C out/Release -j$(getconf _NPROCESSORS_ONLN)
+
+      - name: Show binary info
+        run: |
+          ./out/Release/node --version
+          ./out/Release/node -p 'process.versions'
+          file ./out/Release/node
+          ls -lh ./out/Release/node
+
+      - name: Smoke-check the test passes once
+        run: ./out/Release/node test/parallel/test-http2-close-while-writing.js
+
+      # ---------------------------------------------------------------
+      # Variant A: original test (unmodified). External hang detection
+      # via timeout; on hang capture sample/lldb/lsof/netstat. This is
+      # our primary repro path.
+      # ---------------------------------------------------------------
+      - name: 'Variant A: original test, external timeout + native diagnostics'
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 tools/repro-flaky-http2/run-loop.py \
+            ./out/Release/node \
+            test/parallel/test-http2-close-while-writing.js \
+            artifacts/variant-a-original \
+            "$ITER" "$TIMEOUT_S" "$MAX_CAP"
+
+      # ---------------------------------------------------------------
+      # Variant B: instrumented test. Logs every event with timestamps
+      # and self-dumps state on hang. The dump tells us *which*
+      # hypothesis fits (H1 server zombie / H2 no data event / H3
+      # cleanup blocked). Run sequentially so the dumps are unambiguous.
+      # ---------------------------------------------------------------
+      - name: 'Variant B: instrumented test, JS state dump on hang'
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 tools/repro-flaky-http2/run-loop.py \
+            ./out/Release/node \
+            tools/repro-flaky-http2/instrumented-test.js \
+            artifacts/variant-b-instrumented \
+            "$ITER" "$TIMEOUT_S" "$MAX_CAP" \
+            HANG_TIMEOUT_MS=10000
+
+      # ---------------------------------------------------------------
+      # Variant C: instrumented test WITH the proposed fix applied (use
+      # `once('data')` + `this.resume()` inside the listener). This is
+      # the control: if it never hangs while variant B does, that
+      # confirms the test-logic patch fixes whatever the hypothesis is.
+      # ---------------------------------------------------------------
+      - name: 'Variant C (control): instrumented test with FIX applied'
+        if: always()
+        continue-on-error: true
+        run: |
+          # Smaller iteration count: this should never hang. We just
+          # want a few thousand runs of confidence.
+          python3 tools/repro-flaky-http2/run-loop.py \
+            ./out/Release/node \
+            tools/repro-flaky-http2/instrumented-test.js \
+            artifacts/variant-c-control-fixed \
+            5000 "$TIMEOUT_S" "$MAX_CAP" \
+            HANG_TIMEOUT_MS=10000 APPLY_FIX=1
+
+      # ---------------------------------------------------------------
+      # Variant D: original test under NODE_DEBUG. Verbose, so we run
+      # fewer iterations. If a hang fires here, the http2/stream
+      # debuglog should pinpoint the last call into native code before
+      # things stall.
+      # ---------------------------------------------------------------
+      - name: 'Variant D: NODE_DEBUG=http2,stream,net,tls (low iter, full log on hang)'
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 tools/repro-flaky-http2/run-loop.py \
+            ./out/Release/node \
+            test/parallel/test-http2-close-while-writing.js \
+            artifacts/variant-d-debuglog \
+            2000 "$TIMEOUT_S" "$MAX_CAP" \
+            NODE_DEBUG=http2,stream,net,tls \
+            NODE_DEBUG_NATIVE=http2
+
+      # ---------------------------------------------------------------
+      # Variant E: instrumented test under NODE_DEBUG — combines JS
+      # event log with native debug output around the same hang.
+      # ---------------------------------------------------------------
+      - name: 'Variant E: instrumented + NODE_DEBUG'
+        if: always()
+        continue-on-error: true
+        run: |
+          python3 tools/repro-flaky-http2/run-loop.py \
+            ./out/Release/node \
+            tools/repro-flaky-http2/instrumented-test.js \
+            artifacts/variant-e-instrumented-debuglog \
+            2000 "$TIMEOUT_S" "$MAX_CAP" \
+            HANG_TIMEOUT_MS=10000 \
+            NODE_DEBUG=http2,stream,net,tls \
+            NODE_DEBUG_NATIVE=http2
+
+      # ---------------------------------------------------------------
+      # Variant F: parallel run via the existing tools/test.py. This is
+      # closest to how the bug was originally reproduced (10000 reps
+      # with -j parallelism). Captures macro-level flake rate even if
+      # individual diagnostics are limited.
+      # ---------------------------------------------------------------
+      - name: 'Variant F: tools/test.py --repeat parallel run'
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p artifacts/variant-f-toolspy
+          # Replicates the original reproducer (`--repeat=10000` parallel)
+          # exactly so we know the harness itself isn't masking the bug.
+          # Native-level diagnostics for individual hangs are gathered by
+          # variants A/B; this just confirms the macro flake rate.
+          python3 tools/test.py \
+            --repeat="$ITER" \
+            -j "$(getconf _NPROCESSORS_ONLN)" \
+            -p tap \
+            --logfile=artifacts/variant-f-toolspy/log.tap \
+            parallel/test-http2-close-while-writing \
+            > artifacts/variant-f-toolspy/stdout.txt 2>&1 || true
+          tail -200 artifacts/variant-f-toolspy/stdout.txt || true
+
+      # ---------------------------------------------------------------
+      # Always: aggregate summary & ship artifacts.
+      # ---------------------------------------------------------------
+      - name: Aggregate summary
+        if: always()
+        run: |
+          {
+            echo "# Run summary on ${{ matrix.os }}"
+            echo
+            echo "Node: $(./out/Release/node --version 2>/dev/null || echo unknown)"
+            echo "Date: $(date -u +%FT%TZ)"
+            echo
+            for d in artifacts/variant-*; do
+              echo "## $(basename "$d")"
+              if [ -f "$d/summary.txt" ]; then
+                cat "$d/summary.txt"
+              fi
+              echo
+              if [ -d "$d/hangs" ]; then
+                count=$(ls "$d/hangs"/*.stdout.txt 2>/dev/null | wc -l | tr -d ' ')
+                echo "Captured hang stdouts: $count"
+                first=$(ls "$d/hangs"/*.stdout.txt 2>/dev/null | head -1)
+                if [ -n "$first" ]; then
+                  echo "First hang stdout (truncated):"
+                  head -200 "$first"
+                fi
+              fi
+              echo
+              echo "---"
+              echo
+            done
+          } | tee artifacts/SUMMARY.md
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repro-${{ matrix.os }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14
