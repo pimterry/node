@@ -214,9 +214,11 @@ jobs:
       # ---------------------------------------------------------------
       # Always: aggregate summary & ship artifacts.
       # ---------------------------------------------------------------
-      - name: Aggregate summary
+      - name: Aggregate summary (inline dumps for hangs)
         if: always()
         run: |
+          # Dump every captured hang's evidence directly into the workflow log so
+          # we don't have to download artifacts to know what happened.
           {
             echo "# Run summary on ${{ matrix.os }}"
             echo
@@ -229,16 +231,52 @@ jobs:
                 cat "$d/summary.txt"
               fi
               echo
+
               if [ -d "$d/hangs" ]; then
-                count=$(ls "$d/hangs"/*.stdout.txt 2>/dev/null | wc -l | tr -d ' ')
-                echo "Captured hang stdouts: $count"
-                first=$(ls "$d/hangs"/*.stdout.txt 2>/dev/null | head -1)
-                if [ -n "$first" ]; then
-                  echo "First hang stdout (truncated):"
-                  head -200 "$first"
+                # JSON state dumps live on stderr (instrumented test); native
+                # state (sample/lldb/lsof/netstat) lives in *.sample.txt etc.
+                stderr_count=$(ls "$d/hangs"/*.stderr.txt 2>/dev/null | wc -l | tr -d ' ')
+                echo "### Captured hangs: $stderr_count"
+                echo
+
+                for f in $(ls "$d/hangs"/*.stderr.txt 2>/dev/null | head -3); do
+                  echo "#### $(basename "$f") (stderr — has JSON dump)"
+                  echo '```'
+                  # Limit to 400 lines per dump to keep the log manageable.
+                  head -400 "$f"
+                  echo '```'
+                  echo
+                done
+                for f in $(ls "$d/hangs"/*.lldb.txt 2>/dev/null | head -3); do
+                  echo "#### $(basename "$f") (lldb backtrace)"
+                  echo '```'
+                  head -200 "$f"
+                  echo '```'
+                  echo
+                done
+                for f in $(ls "$d/hangs"/*.sample.txt 2>/dev/null | head -3); do
+                  echo "#### $(basename "$f") (sample profile, top frames)"
+                  echo '```'
+                  head -100 "$f"
+                  echo '```'
+                  echo
+                done
+              fi
+
+              if [ -d "$d/errors" ]; then
+                err_count=$(ls "$d/errors"/*.stderr.txt 2>/dev/null | wc -l | tr -d ' ')
+                if [ "$err_count" != "0" ]; then
+                  echo "### Captured errors: $err_count"
+                  for f in $(ls "$d/errors"/*.stderr.txt 2>/dev/null | head -2); do
+                    echo "#### $(basename "$f")"
+                    echo '```'
+                    head -100 "$f"
+                    echo '```'
+                    echo
+                  done
                 fi
               fi
-              echo
+
               echo "---"
               echo
             done
