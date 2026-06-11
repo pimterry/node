@@ -12,7 +12,12 @@ if (!hasQuic) {
   skip('QUIC is not enabled');
 }
 
-const { listen, connect } = await import('../common/quic.mjs');
+const { key, cert, listen, connect } = await import('../common/quic.mjs');
+// Block 1 drives real HTTP/3, so it goes through node:http3 rather than
+// the raw QUIC helper: the h3 ALPN alone no longer installs the
+// application.
+const { listen: listenHttp3, connect: connectHttp3 } =
+  await import('node:http3');
 const { bytes } = await import('stream/iter');
 
 const encoder = new TextEncoder();
@@ -27,21 +32,21 @@ const decoder = new TextDecoder();
   const gotTicket = Promise.withResolvers();
   const gotToken = Promise.withResolvers();
 
-  const endpoint = await listen(mustCall((ss) => {
+  const endpoint = await listenHttp3(mustCall((ss) => {
     // No streams initially, stream must arrive in the onstream event, for
     // both the normal and the 0RTT sessions:
-    assert.strictEqual(ss.stats.bidiInStreamCount, 0n);
+    assert.strictEqual(ss.session.stats.bidiInStreamCount, 0n);
     ss.onstream = mustCall(async (stream) => {
+      stream.onheaders = mustCall(() => {
+        stream.sendHeaders({ ':status': '200' });
+        stream.writer.writeSync(encoder.encode('hello'));
+        stream.writer.endSync();
+      });
       await stream.closed;
       ss.close();
     });
   }, 2), {
-    alpn: ['h3'],
-    onheaders: mustCall(function() {
-      this.sendHeaders({ ':status': '200' });
-      this.writer.writeSync(encoder.encode('hello'));
-      this.writer.endSync();
-    }, 2),
+    sni: { '*': { keys: [key], certs: [cert] } },
   });
 
   const request = {
@@ -52,34 +57,28 @@ const decoder = new TextDecoder();
   };
 
   // Open a 1st session, send a request, get session ticket & token:
-  const cs1 = await connect(endpoint.address, {
+  const cs1 = await connectHttp3(endpoint.address, {
     servername: 'localhost',
-    alpn: 'h3',
+    verifyPeer: 'manual',
     onsessionticket: mustCall((t) => { ticket = t; gotTicket.resolve(); }, 2),
     onnewtoken: mustCall((t) => { token = t; gotToken.resolve(); }),
   });
   await cs1.opened;
   await Promise.all([gotTicket.promise, gotToken.promise]);
-  const s1 = await cs1.createBidirectionalStream({
-    headers: request,
-    onheaders: mustCall(),
-  });
+  const s1 = await cs1.request(request, { onheaders: mustCall() });
   await bytes(s1);
   await Promise.all([s1.closed, cs1.closed]);
 
   // Open 2nd session, reusing the ticket & token:
-  const cs2 = await connect(endpoint.address, {
+  const cs2 = await connectHttp3(endpoint.address, {
     servername: 'localhost',
-    alpn: 'h3',
+    verifyPeer: 'manual',
     sessionTicket: ticket,
     token,
   });
 
   // Send a 0RTT request immediately, before the handshake completes:
-  const s2 = await cs2.createBidirectionalStream({
-    headers: request,
-    onheaders: mustCall(),
-  });
+  const s2 = await cs2.request(request, { onheaders: mustCall() });
 
   const info = await cs2.opened;
   assert.strictEqual(info.earlyDataAccepted, true);

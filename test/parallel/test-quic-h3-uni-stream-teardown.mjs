@@ -13,7 +13,7 @@ if (!hasQuic) {
 }
 
 const { createPrivateKey } = await import('node:crypto');
-const { listen, connect } = await import('node:quic');
+const { listen, connect } = await import('node:http3');
 
 const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');
@@ -27,7 +27,9 @@ const session = await connect(endpoint.address, {
   verifyPeer: 'manual',
 });
 
-const stream = await session.createUnidirectionalStream();
+// A unidirectional stream is not an HTTP/3 request stream, so it is opened
+// directly on the underlying QUIC session rather than through request().
+const stream = await session.session.createUnidirectionalStream();
 stream.writer.writeSync('x');
 
 endpoint.destroy();

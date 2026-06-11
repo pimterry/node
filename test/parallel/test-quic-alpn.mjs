@@ -43,6 +43,17 @@ const clientSession = await connect(serverEndpoint.address, {
 
 await Promise.all([serverOpened.promise, checkSession(clientSession)]);
 await clientSession.close();
+
+// ALPN is required: node:quic is transport-only and assumes no application
+// protocol, so a session created without one is rejected with a clear error
+// rather than silently defaulting.
+await assert.rejects(listen(mustNotCall(), {
+  sni: { '*': { keys: [key], certs: [cert] } },
+}), { code: 'ERR_INVALID_ARG_VALUE', message: /options\.alpn/ });
+await assert.rejects(connect(serverEndpoint.address, { verifyPeer: 'manual' }), {
+  code: 'ERR_INVALID_ARG_VALUE', message: /options\.alpn/,
+});
+
 await serverEndpoint.close();
 
 // QUIC requires an application protocol, so a server that offers none is

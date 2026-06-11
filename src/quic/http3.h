@@ -14,6 +14,8 @@ namespace node::quic {
 std::unique_ptr<Session::Application> CreateHttp3Application(
     Session* session, const Session::Application_Options& options);
 
+void RegisterHttp3Application();
+
 }  // namespace node::quic
 
 #endif  // defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS

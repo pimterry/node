@@ -201,7 +201,7 @@ ngtcp2_conn_read_pkt()
     → TLSContext::OnClientHello()        // SSL_CTX_set_client_hello_cb
        ├── SelectSNIContext() + SSL_set_SSL_CTX()
        ├── crypto::SelectNextProtocol()  // against that identity's list
-       ├── Session::InstallApplicationForAlpn()
+       ├── Session::InstallApplication()
        └── return SSL_CLIENT_HELLO_RETRY  // handshake suspended here
     ← SSL_ERROR_WANT_CLIENT_HELLO_CB     // ngtcp2 treats this as "not done"
  ← 0

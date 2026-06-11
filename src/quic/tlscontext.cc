@@ -401,7 +401,7 @@ crypto::ClientHelloResult TLSContext::OnClientHello(
   // Install the Application while the handshake is still stopped, so that
   // it is in place before a session ticket can be accepted and early data
   // can start arriving.
-  session.InstallApplicationForAlpn(*negotiated);
+  session.InstallApplication();
   session.set_hello_processed();
 
   // Stop here. Session::AfterNgtcp2Read surfaces the server session to

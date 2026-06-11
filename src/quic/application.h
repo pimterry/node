@@ -2,6 +2,8 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
+#include <string_view>
+
 #include "base_object.h"
 #include "bindingdata.h"
 #include "defs.h"
@@ -246,6 +248,17 @@ class Session::Application : public MemoryRetainer {
 // Create a DefaultApplication for the given session.
 std::unique_ptr<Session::Application> CreateDefaultApplication(
     Session* session, const Session::Application_Options& options);
+
+// A factory for protocol-specific Session::Application implementations.
+// Protocols register themselves under a name at binding initialization
+// (e.g. "http3"); a session installs one only when its options request
+// that name explicitly.
+using ApplicationFactory = std::unique_ptr<Session::Application> (*)(
+    Session* session, const Session::Application_Options& options);
+void RegisterApplicationFactory(std::string_view name,
+                                ApplicationFactory factory);
+// Returns the factory registered under name, or nullptr.
+ApplicationFactory FindApplicationFactory(std::string_view name);
 
 }  // namespace node::quic
 

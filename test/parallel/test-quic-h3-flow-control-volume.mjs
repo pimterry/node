@@ -24,7 +24,7 @@ if (!hasQuic) {
   skip('QUIC is not enabled');
 }
 
-const { listen, connect } = await import('node:quic');
+const { listen, connect } = await import('node:http3');
 const { createPrivateKey } = await import('node:crypto');
 const { makePayload, hashBytes } = await import('../common/quic.mjs');
 const { bytes } = await import('stream/iter');
@@ -50,6 +50,18 @@ const serverDone = Promise.withResolvers();
 
 const serverEndpoint = await listen(mustCall(async (serverSession) => {
   serverSession.onstream = mustCall(async (stream) => {
+    stream.onheaders = mustCall((headers) => {
+      assert.strictEqual(headers[':method'], 'POST');
+      stream.sendHeaders({
+        ':status': '200',
+        'content-type': 'application/octet-stream',
+      });
+      // Send a large response body concurrently with reading the request
+      // body, so both directions are flow-control bound at the same time.
+      const w = stream.writer;
+      w.writeSync(responseBody);
+      w.endSync();
+    });
     // Read the large request body. This is the path where DATA payload
     // credit is deferred until consumption.
     const body = await bytes(stream);
@@ -69,13 +81,6 @@ const serverEndpoint = await listen(mustCall(async (serverSession) => {
   },
   maxStreamWindow: kStreamWindow,
   maxWindow: kConnWindow,
-  onheaders: mustCall(function(headers) {
-    assert.strictEqual(headers[':method'], 'POST');
-    this.sendHeaders({ ':status': '200', 'content-type': 'application/octet-stream' });
-    // Send a large response body concurrently with reading the request
-    // body, so both directions are flow-control bound at the same time.
-    this.setBody(responseBody);
-  }),
 });
 
 const clientSession = await connect(serverEndpoint.address, {
@@ -94,15 +99,14 @@ assert.strictEqual(info.protocol, 'h3');
 
 const headersReceived = Promise.withResolvers();
 
-const stream = await clientSession.createBidirectionalStream({
-  headers: {
-    ':method': 'POST',
-    ':path': '/upload',
-    ':scheme': 'https',
-    ':authority': 'localhost',
-  },
+const stream = await clientSession.request({
+  ':method': 'POST',
+  ':path': '/upload',
+  ':scheme': 'https',
+  ':authority': 'localhost',
+}, {
   body: requestBody,
-  onheaders: mustCall(function(headers) {
+  onheaders: mustCall((headers) => {
     assert.strictEqual(headers[':status'], 200);
     headersReceived.resolve();
   }),

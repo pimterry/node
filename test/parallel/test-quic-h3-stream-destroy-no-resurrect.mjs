@@ -23,7 +23,7 @@ if (!hasQuic) {
   skip('QUIC is not enabled');
 }
 
-const { listen, connect } = await import('node:quic');
+const { listen, connect } = await import('node:http3');
 const { createPrivateKey } = await import('node:crypto');
 const { makePayload } = await import('../common/quic.mjs');
 
@@ -45,13 +45,15 @@ const serverEndpoint = await listen(mustCall((serverSession) => {
   serverSession.onstream = mustCall((stream) => {
     // The client destroys these early; the truncated write is expected.
     stream.onerror = () => {};
+    stream.onheaders = mustCall(() => {
+      stream.sendHeaders({ ':status': '200' });
+      const w = stream.writer;
+      w.writeSync(responseBody);
+      w.endSync();
+    });
   }, kRequests);
 }), {
   sni: { '*': { keys: [key], certs: [cert] } },
-  onheaders: mustCall(function() {
-    this.sendHeaders({ ':status': '200' });
-    this.setBody(responseBody);
-  }, kRequests),
 });
 
 const clientSession = await connect(serverEndpoint.address, {
@@ -73,13 +75,11 @@ const info = await clientSession.opened;
 assert.strictEqual(info.protocol, 'h3');
 
 for (let i = 0; i < kRequests; i++) {
-  const stream = await clientSession.createBidirectionalStream({
-    headers: {
-      ':method': 'GET',
-      ':path': `/${i}`,
-      ':scheme': 'https',
-      ':authority': 'localhost',
-    },
+  const stream = await clientSession.request({
+    ':method': 'GET',
+    ':path': `/${i}`,
+    ':scheme': 'https',
+    ':authority': 'localhost',
   });
 
   // Take one batch of the response, then abandon the rest and destroy, so
@@ -91,7 +91,8 @@ for (let i = 0; i < kRequests; i++) {
 }
 
 // Exactly one locally-opened stream per request.
-assert.strictEqual(Number(clientSession.stats.bidiOutStreamCount), kRequests);
+assert.strictEqual(Number(clientSession.session.stats.bidiOutStreamCount),
+                   kRequests);
 
 await clientSession.close();
 await serverEndpoint.close();
