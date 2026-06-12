@@ -498,8 +498,12 @@ class Http3ApplicationImpl final : public Session::Application {
           flags.fin,
           flags.early);
 
+    uint64_t ts = session().rx_packet_ts();
+    if (ts == 0) [[unlikely]] {
+      ts = uv_hrtime();
+    }
     auto nread = nghttp3_conn_read_stream2(
-        *this, id, data, datalen, flags.fin ? 1 : 0, uv_hrtime());
+        *this, id, data, datalen, flags.fin ? 1 : 0, ts);
 
     if (nread < 0) {
       Debug(&session(),
@@ -714,6 +718,11 @@ class Http3ApplicationImpl final : public Session::Application {
 
     session().SetApplicationError(nghttp3_err_infer_quic_app_error_code(rv));
     session().Close();
+  }
+
+  void StreamRemoved(stream_id id) override {
+    if (conn_) nghttp3_conn_set_stream_user_data(*this, id, nullptr);
+    header_state_.erase(id);
   }
 
   bool SendHeaders(const Stream& stream,
@@ -1014,7 +1023,7 @@ class Http3ApplicationImpl final : public Session::Application {
   }
 
   void OnBeginHeaders(stream_id id) {
-    auto stream = FindOrCreateStream(conn_.get(), &session(), id);
+    auto stream = FindOrCreateStream(id);
     if (!stream) [[unlikely]]
       return;
     Debug(&session(),
@@ -1071,7 +1080,7 @@ class Http3ApplicationImpl final : public Session::Application {
   }
 
   void OnBeginTrailers(stream_id id) {
-    auto stream = FindOrCreateStream(conn_.get(), &session(), id);
+    auto stream = FindOrCreateStream(id);
     if (!stream) [[unlikely]]
       return;
     Debug(&session(),
@@ -1286,20 +1295,27 @@ class Http3ApplicationImpl final : public Session::Application {
     return app;
   }
 
-  static BaseObjectWeakPtr<Stream> FindOrCreateStream(nghttp3_conn* conn,
-                                                      Session* session,
-                                                      stream_id id) {
-    if (auto stream = session->FindStream(id)) {
+  // Persist the Stream* in the stream user data, so we can look it
+  // up directly without a FindStream map lookup every time.
+  void BindStreamUserData(stream_id id, Stream* stream) {
+    if (conn_) nghttp3_conn_set_stream_user_data(*this, id, stream);
+  }
+
+  BaseObjectWeakPtr<Stream> FindOrCreateStream(stream_id id) {
+    if (auto stream = session().FindStream(id)) {
+      BindStreamUserData(id, stream.get());
       return stream;
     }
     // No record of a locally-initiated stream means we already destroyed it,
     // and frames still in flight must not bring it back to life. See
     // DefaultApplication::ReceiveStreamData for the same guard on the raw
     // QUIC path.
-    if (!session->is_destroyed() && ngtcp2_conn_is_local_stream(*session, id)) {
+    if (!session().is_destroyed() &&
+        ngtcp2_conn_is_local_stream(session(), id)) {
       return {};
     }
-    if (auto stream = session->CreateStream(id)) {
+    if (auto stream = session().CreateStream(id)) {
+      BindStreamUserData(id, stream.get());
       return stream;
     }
     return {};
@@ -1323,8 +1339,11 @@ class Http3ApplicationImpl final : public Session::Application {
     auto& app = *ptr;
     NgHttp3CallbackScope scope(&app.session());
 
-    auto stream = app.session().FindStream(id);
-    if (!stream) return NGHTTP3_ERR_CALLBACK_FAILURE;
+    BaseObjectPtr<Stream> stream(static_cast<Stream*>(stream_user_data));
+    if (!stream) [[unlikely]] {
+      stream = app.session().FindStream(id);
+      if (!stream) return NGHTTP3_ERR_CALLBACK_FAILURE;
+    }
 
     if (stream->is_eos()) {
       *pflags |= NGHTTP3_DATA_FLAG_EOF;
@@ -1405,7 +1424,11 @@ class Http3ApplicationImpl final : public Session::Application {
     auto ptr = From(conn, conn_user_data);
     CHECK_NOT_NULL(ptr);
     auto& app = *ptr;
-    if (auto stream = app.session().FindStream(id)) {
+    BaseObjectPtr<Stream> stream(static_cast<Stream*>(stream_user_data));
+    if (!stream) [[unlikely]] {
+      stream = app.session().FindStream(id);
+    }
+    if (stream) {
       stream->Acknowledge(static_cast<size_t>(datalen));
     }
     return NGTCP2_SUCCESS;
@@ -1439,29 +1462,34 @@ class Http3ApplicationImpl final : public Session::Application {
     if (app.is_control_stream(id)) [[unlikely]] {
       return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
-    auto& session = app.session();
+    BaseObjectPtr<Stream> stream(static_cast<Stream*>(stream_user_data));
+    if (!stream) [[unlikely]] {
+      auto& session = app.session();
 
-    // DATA frames for a request stream the application already destroyed can
-    // still arrive. Drop the payload rather than resurrecting the stream or
-    // tearing down the connection, but return its credit: unlike framing
-    // bytes, DATA payload is not included in the count nghttp3 reports to
-    // ReceiveStreamData, so we own it. The is_destroyed() check must come
-    // first, see DefaultApplication::ReceiveStreamData.
-    if (!session.is_destroyed() && !session.FindStream(id) &&
-        ngtcp2_conn_is_local_stream(session, id)) {
-      Debug(&session,
-            "HTTP/3 discarding %zu bytes for destroyed local stream %" PRIi64,
-            datalen,
-            id);
-      app.ReturnConnectionCredit(datalen);
-      return NGTCP2_SUCCESS;
-    }
+      // DATA frames for a request stream the application already destroyed can
+      // still arrive. Drop the payload rather than resurrecting the stream or
+      // tearing down the connection, but return its credit: unlike framing
+      // bytes, DATA payload is not included in the count nghttp3 reports to
+      // ReceiveStreamData, so we own it. The is_destroyed() check must come
+      // first, see DefaultApplication::ReceiveStreamData.
+      if (!session.is_destroyed() && !session.FindStream(id) &&
+          ngtcp2_conn_is_local_stream(session, id)) {
+        Debug(&session,
+              "HTTP/3 discarding %zu bytes for destroyed local stream %" PRIi64,
+              datalen,
+              id);
+        app.ReturnConnectionCredit(datalen);
+        return NGTCP2_SUCCESS;
+      }
 
-    if (auto stream = FindOrCreateStream(conn, &session, id)) [[likely]] {
-      stream->ReceiveData(data, datalen, Stream::ReceiveDataFlags{});
-      return NGTCP2_SUCCESS;
+      if (auto created = app.FindOrCreateStream(id)) {
+        created->ReceiveData(data, datalen, Stream::ReceiveDataFlags{});
+        return NGTCP2_SUCCESS;
+      }
+      return NGHTTP3_ERR_CALLBACK_FAILURE;
     }
-    return NGHTTP3_ERR_CALLBACK_FAILURE;
+    stream->ReceiveData(data, datalen, Stream::ReceiveDataFlags{});
+    return NGTCP2_SUCCESS;
   }
 
   static int on_deferred_consume(nghttp3_conn* conn,

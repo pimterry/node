@@ -386,6 +386,8 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
                   const PacketInfo& pkt_info = PacketInfo(),
                   uint64_t ts = 0);
 
+  uint64_t rx_packet_ts() const { return rx_packet_ts_; }
+
   // Handles the result of an ngtcp2 call that drives inbound processing
   // (ngtcp2_conn_read_pkt or ngtcp2_conn_continue_handshake).
   bool AfterNgtcp2Read(int err);
@@ -734,6 +736,8 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
     uint8_t prefer_try_send : 1 = 0;
   };
   Flags flags_;
+
+  uint64_t rx_packet_ts_ = 0;
 
   bool hello_processed_ = false;
 
