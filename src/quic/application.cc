@@ -74,23 +74,10 @@ bool Session::Application::AcknowledgeStreamData(stream_id id, size_t datalen) {
   return true;
 }
 
-void Session::Application::CollectSessionTicketAppData(
-    SessionTicket::AppData* app_data) const {
-  // By default, write just the application type byte.
-  uint8_t buf[1] = {static_cast<uint8_t>(type())};
-  app_data->Set(uv_buf_init(reinterpret_cast<char*>(buf), 1));
-}
-
 SessionTicket::AppData::Status
 Session::Application::ExtractSessionTicketAppData(
     const SessionTicket::AppData& app_data, Flag flag) {
-  // CollectSessionTicketAppData writes just the type byte, so all this can
-  // check is that the ticket came from the same application type.
-  auto data = app_data.Get();
-  if (!data || data->len != 1 ||
-      static_cast<uint8_t>(data->base[0]) != static_cast<uint8_t>(type())) {
-    return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
-  }
+  // By default we do not have any application data to retrieve.
   return flag == Flag::STATUS_RENEW
              ? SessionTicket::AppData::Status::TICKET_USE_RENEW
              : SessionTicket::AppData::Status::TICKET_USE;

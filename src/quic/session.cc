@@ -133,7 +133,6 @@ uint64_t MaxDatagramPayload(uint64_t max_frame_size) {
   V(HANDSHAKE_COMPLETED, handshake_completed, uint8_t)                         \
   V(HANDSHAKE_CONFIRMED, handshake_confirmed, uint8_t)                         \
   V(STREAM_OPEN_ALLOWED, stream_open_allowed, uint8_t)                         \
-  V(PRIORITY_SUPPORTED, priority_supported, uint8_t)                           \
   V(WRAPPED, wrapped, uint8_t)                                                 \
   V(IS_SERVER, is_server, uint8_t)                                             \
   V(HAS_APPLICATION, has_application, uint8_t)                                 \
@@ -3683,9 +3682,7 @@ void Session::CollectSessionTicketAppData(
   if (impl_->application_) {
     return application().CollectSessionTicketAppData(app_data);
   }
-  // Native path: write just the DEFAULT type byte.
-  uint8_t buf[1] = {static_cast<uint8_t>(Application::Type::DEFAULT)};
-  app_data->Set(uv_buf_init(reinterpret_cast<char*>(buf), 1));
+  // Native path: sessions with no application have no app data to embed.
 }
 
 SessionTicket::AppData::Status Session::ExtractSessionTicketAppData(
@@ -3705,15 +3702,12 @@ SessionTicket::AppData::Status Session::ExtractSessionTicketAppData(
     // No app data in the ticket. Accept optimistically.
     return accept();
   }
-  // Native path (no application): CollectSessionTicketAppData writes just
-  // the DEFAULT type byte. Application-typed data cannot be validated
-  // without that application, so ignore it and fall back to 1-RTT.
-  const auto* p = reinterpret_cast<const uint8_t*>(data->base);
-  if (p[0] != static_cast<uint8_t>(Application::Type::DEFAULT)) {
-    Debug(this, "Session ticket app data has an unusable type byte");
-    return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
-  }
-  return accept();
+  // Native path (no application): native tickets embed no app data (the
+  // empty case is accepted above), so any app data present is
+  // application-typed and cannot be validated here. Reject it, falling
+  // back cleanly to a full 1-RTT handshake.
+  Debug(this, "Session ticket app data is unusable without an application");
+  return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
 }
 
 void Session::MemoryInfo(MemoryTracker* tracker) const {
@@ -3824,6 +3818,8 @@ bool Session::tls_info_ready() const {
 }
 
 void Session::FlushPendingQlog() {
+  // Once we are firing events, the server session is active:
+  active_ = true;
   if (is_destroyed()) return;
   DCHECK(impl_->state()->wrapped);
   // Runs synchronously immediately after the new-session callback returns.
@@ -3837,11 +3833,6 @@ void Session::FlushPendingQlog() {
 bool Session::has_origin_listener() const {
   return HasListenerFlag(impl_->state()->listener_flags,
                          SessionListenerFlags::ORIGIN);
-}
-
-void Session::set_priority_supported(bool on) {
-  DCHECK(!is_destroyed());
-  impl_->state()->priority_supported = on ? 1 : 0;
 }
 
 void Session::ExtendStreamOffset(stream_id id, size_t amount) {
@@ -4152,6 +4143,9 @@ bool Session::HandshakeCompleted() {
   // (set during ALPN negotiation). Should be impossible unless ALPN flow is
   // changed drastically, but good to check as it'd lose sessions.
   DCHECK(!is_server() || hello_processed_);
+  // For a client, once the handshake is completed, we're active. The server
+  // is active earlier, as 0RTT etc can fire before handshake completion.
+  active_ = true;
 
   STAT_RECORD_TIMESTAMP(Stats, handshake_completed_at);
   SetStreamOpenAllowed();
