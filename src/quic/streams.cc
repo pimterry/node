@@ -459,15 +459,17 @@ struct Stream::Impl {
     Local<Array> headers = args[1].As<Array>();
     HeadersFlags flags = FromV8Value<HeadersFlags>(args[2]);
 
+    // Headers require an installed application that supports them
+    // (e.g. HTTP/3); with no application there is nowhere to send them.
+    if (!stream->session().has_application() ||
+        !stream->session().application().SupportsHeaders()) {
+      return args.GetReturnValue().Set(false);
+    }
+
     // If the stream is pending, the headers will be queued until the
     // stream is opened, at which time the queued header block will be
-    // immediately sent when the stream is opened. If we already know
-    // that the application does not support headers, return false
-    // immediately so the JS side can throw an appropriate error.
+    // immediately sent when the stream is opened.
     if (stream->is_pending()) {
-      if (!stream->session().application().SupportsHeaders()) {
-        return args.GetReturnValue().Set(false);
-      }
       stream->EnqueuePendingHeaders(kind, headers, flags);
       return args.GetReturnValue().Set(true);
     }
@@ -527,7 +529,9 @@ struct Stream::Impl {
         .pending = stream->is_pending(),
     };
 
-    if (!stream->is_pending()) {
+    // Priority signaling is application-defined (e.g. HTTP/3 RFC 9218);
+    // with no application installed only the stored value is updated.
+    if (!stream->is_pending() && stream->session().has_application()) {
       stream->session().application().SetStreamPriority(
           *stream, priority, flags);
     }
@@ -542,7 +546,8 @@ struct Stream::Impl {
     // server side, we delegate to the application which can read
     // the peer's requested priority (e.g., from PRIORITY_UPDATE
     // frames in HTTP/3).
-    if (!stream->session().is_server()) {
+    if (!stream->session().is_server() ||
+        !stream->session().has_application()) {
       auto& pri = stream->priority_;
       uint32_t packed = (static_cast<uint32_t>(pri.priority) << 1) |
                         (pri.flags == StreamPriorityFlags::INCREMENTAL ? 1 : 0);
@@ -1239,17 +1244,18 @@ void Stream::NotifyStreamOpened(stream_id id) {
   maybe_pending_stream_.reset();
 
   if (priority_.pending) {
-    session().application().SetStreamPriority(
-        *this, priority_.priority, priority_.flags);
+    if (session().has_application()) {
+      session().application().SetStreamPriority(
+          *this, priority_.priority, priority_.flags);
+    }
     priority_.pending = false;
   }
   if (!pending_headers_queue_.empty()) {
-    if (!session().application().SupportsHeaders()) {
-      // Headers were enqueued while the application was not yet known
-      // (headers_supported == 0), and the negotiated application does
-      // not support headers. This is a fatal mismatch.
-      Destroy(QuicError::ForApplication(
-          session().application().GetInternalErrorCode()));
+    if (!session().has_application() ||
+        !session().application().SupportsHeaders()) {
+      // Headers were enqueued but the session has no application that
+      // supports them. This is a fatal mismatch.
+      Destroy(QuicError::ForApplication(session().internal_error_code()));
       return;
     }
     decltype(pending_headers_queue_) queue;
@@ -1268,7 +1274,7 @@ void Stream::NotifyStreamOpened(stream_id id) {
     NotifyReadableEnded(pending_close_read_code_);
   }
   if (!is_remote_unidirectional() && !is_writable() &&
-      !session_->application().stream_fin_managed_by_application()) {
+      !session_->stream_fin_managed_by_application()) {
     NotifyWritableEnded(pending_close_write_code_);
   }
 
