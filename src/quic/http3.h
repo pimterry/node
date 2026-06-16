@@ -2,18 +2,12 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
-#include <memory>
-#include "application.h"
-#include "session.h"
-
 namespace node::quic {
 
-// Create an HTTP/3 Application implementation for the given session.
-// Uses the Application_Options from the session's config for HTTP/3
-// specific settings (qpack, max header length, etc.).
-std::unique_ptr<Session::Application> CreateHttp3Application(
-    Session* session, const Session::Application_Options& options);
-
+// Registers the HTTP/3 application factory (creation, settings parsing,
+// and session-ticket hooks) under the name "http3". Called once at
+// binding initialization; a session installs the application only when
+// its options request that name explicitly (set by node:http3).
 void RegisterHttp3Application();
 
 }  // namespace node::quic

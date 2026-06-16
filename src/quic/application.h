@@ -2,6 +2,7 @@
 
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
+#include <memory>
 #include <string_view>
 
 #include "base_object.h"
@@ -13,26 +14,22 @@
 
 namespace node::quic {
 
-// An Application implements the ALPN-protocol specific semantics on behalf
+// An Application implements the protocol-specific semantics on behalf
 // of a QUIC Session.
 class Session::Application : public MemoryRetainer {
  public:
-  using Options = Session::Application_Options;
-
-  Application(Session* session, const Options& options);
+  explicit Application(Session* session);
   DISALLOW_COPY_AND_MOVE(Application)
 
-  // Get the active options for this application. These may differ from the
-  // options passed at construction time since some options can be negotiated.
-  virtual const Options& options() const = 0;
-
-  // The type of Application, exposed via the session state so JS
-  // can observe which Application was selected after ALPN negotiation.
-  // This is used primarily for testing/debugging.
+  // The session-ticket app-data type byte: the leading byte of the
+  // application data embedded in session tickets, identifying how the
+  // remainder of the data is interpreted. DEFAULT tags the native opaque
+  // byte-match data used when no application is installed (the
+  // `appTicketData` option); application-typed values (e.g. HTTP3) tag
+  // data owned by the matching application's ticket hooks.
   enum class Type : uint8_t {
-    NONE = 0,     // Not yet selected (server pre-negotiation)
-    DEFAULT = 1,  // DefaultApplication (non-h3 ALPN)
-    HTTP3 = 2,    // Http3ApplicationImpl (h3 / h3-XX ALPN)
+    DEFAULT = 1,  // Native opaque byte-match data (no application)
+    HTTP3 = 2,    // Http3Conn typed settings data
   };
   virtual Type type() const = 0;
 
@@ -60,14 +57,6 @@ class Session::Application : public MemoryRetainer {
   // there is no defined application code so we fall back to
   // NGTCP2_INTERNAL_ERROR (0x1).
   virtual error_code GetInternalErrorCode() const = 0;
-
-  // The "request rejected" code is sent on RESET_STREAM when an incoming
-  // request stream is rejected without any application processing (e.g.
-  // the session has no consumer for it), so the peer learns the request
-  // was not processed. For HTTP/3 this is NGHTTP3_H3_REQUEST_REJECTED
-  // (0x10b); other applications have no such semantic and reuse the
-  // "no error" code.
-  virtual error_code GetRequestRejectedCode() const = 0;
 
   // Called after Session::Receive processes a packet, outside all callback
   // scopes. Applications can use this to handle deferred operations that
@@ -97,14 +86,6 @@ class Session::Application : public MemoryRetainer {
   // Application.
   virtual bool AcknowledgeStreamData(stream_id id, size_t datalen);
 
-  // Called to determine if a Header can be added to this application.
-  // Applications that do not support headers will always return false.
-  virtual bool CanAddHeader(size_t current_count,
-                            size_t current_headers_length,
-                            size_t this_header_length) {
-    return false;
-  }
-
   // Called when ngtcp2 reports NGTCP2_ERR_STREAM_SHUT_WR for a stream.
   // Applications that manage their own framing (e.g., HTTP/3) must inform
   // their protocol layer that the stream's write side is shut so it stops
@@ -119,14 +100,6 @@ class Session::Application : public MemoryRetainer {
   // Called when the session determines that there is outbound data available
   // to send for the given stream.
   virtual void ResumeStream(stream_id id) {}
-
-  // Called when the Session determines that the maximum number of
-  // remotely-initiated unidirectional streams has been extended. Not all
-  // Application types will require this notification so the default is to do
-  // nothing.
-  virtual void ExtendMaxStreams(EndpointLabel label,
-                                Direction direction,
-                                uint64_t max_streams) {}
 
   // Returns true if the application manages stream FIN internally (e.g.,
   // HTTP/3 uses nghttp3 which sends FIN via the fin flag in writev_stream).
@@ -159,6 +132,14 @@ class Session::Application : public MemoryRetainer {
       const SessionTicket::AppData& app_data,
       SessionTicket::AppData::Source::Flag flag);
 
+  // Returns a JS object describing the application's effective protocol
+  // settings (some values may have been updated by negotiation with the
+  // peer), or an empty result when the application exposes no settings.
+  // The shape is application-defined; the QUIC core never interprets it.
+  virtual v8::MaybeLocal<v8::Object> GetSettingsObject(Environment* env) {
+    return {};
+  }
+
   // Notifies the Application that the identified stream has been closed.
   virtual void ReceiveStreamClose(Stream* stream,
                                   QuicError&& error = QuicError());
@@ -186,11 +167,6 @@ class Session::Application : public MemoryRetainer {
   // receiving headers on streams (e.g. HTTP/3). Applications that
   // do not support headers should return false (the default).
   virtual bool SupportsHeaders() const { return false; }
-
-  // True if this application dispatches the session-level stream
-  // callbacks (onheaders et al) for incoming streams when they are
-  // registered on the session.
-  virtual bool SupportsStreamCallbacks() const { return false; }
 
   // Initiates application-level graceful shutdown signaling (e.g.,
   // HTTP/3 GOAWAY). Called when Session::Close(GRACEFUL) is invoked.
@@ -245,20 +221,31 @@ class Session::Application : public MemoryRetainer {
   Session* session_ = nullptr;
 };
 
-// Create a DefaultApplication for the given session.
-std::unique_ptr<Session::Application> CreateDefaultApplication(
-    Session* session, const Session::Application_Options& options);
+// The registration record for a protocol-specific Session::Application
+// implementation. Protocols register themselves under a name at binding
+// initialization (e.g. "http3"); a session installs one only when its
+// options request that name explicitly. The settings produced and
+// consumed by these hooks are opaque to the QUIC core: only the
+// registering protocol knows their shape or field names.
+struct ApplicationFactory {
+  // Creates the Application for the given session. Any parsed settings
+  // holder produced by parse_settings is carried on the session's
+  // options (application_settings); implementations resolve it from
+  // there (using their defaults when it is nullptr).
+  std::unique_ptr<Session::Application> (*create)(Session* session) = nullptr;
 
-// A factory for protocol-specific Session::Application implementations.
-// Protocols register themselves under a name at binding initialization
-// (e.g. "http3"); a session installs one only when its options request
-// that name explicitly.
-using ApplicationFactory = std::unique_ptr<Session::Application> (*)(
-    Session* session, const Session::Application_Options& options);
+  // Parses the application-specific settings value, supplied through an
+  // internal symbol by the application's consumer layer (e.g.
+  // node:http3), into an opaque holder carried on Session::Options.
+  // Called while session options are processed; invalid user-supplied
+  // values should throw and return Nothing.
+  v8::Maybe<std::shared_ptr<void>> (*parse_settings)(
+      Environment* env, v8::Local<v8::Value> value) = nullptr;
+};
 void RegisterApplicationFactory(std::string_view name,
-                                ApplicationFactory factory);
+                                const ApplicationFactory& factory);
 // Returns the factory registered under name, or nullptr.
-ApplicationFactory FindApplicationFactory(std::string_view name);
+const ApplicationFactory* FindApplicationFactory(std::string_view name);
 
 }  // namespace node::quic
 

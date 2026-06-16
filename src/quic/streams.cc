@@ -31,7 +31,6 @@ using v8::HandleScope;
 using v8::Integer;
 using v8::Just;
 using v8::Local;
-using v8::LocalVector;
 using v8::Maybe;
 using v8::Nothing;
 using v8::Object;
@@ -542,10 +541,11 @@ struct Stream::Impl {
     ASSIGN_OR_RETURN_UNWRAP(&stream, args.This());
 
     // On the client side, priority is always read from the stream's
-    // stored value since the client is the one setting it. On the
-    // server side, we delegate to the application which can read
-    // the peer's requested priority (e.g., from PRIORITY_UPDATE
-    // frames in HTTP/3).
+    // stored value since the client is the one setting it. The same
+    // applies when no application is installed (nothing tracks peer
+    // priority signals). On the server side with an application, we
+    // delegate to the application which can read the peer's requested
+    // priority (e.g., from PRIORITY_UPDATE frames in HTTP/3).
     if (!stream->session().is_server() ||
         !stream->session().has_application()) {
       auto& pri = stream->priority_;
@@ -1356,6 +1356,10 @@ bool Stream::is_eos() const {
   return state()->fin_sent;
 }
 
+bool Stream::wants_headers() const {
+  return state()->wants_headers == 1;
+}
+
 bool Stream::wants_trailers() const {
   return state()->wants_trailers;
 }
@@ -1591,28 +1595,6 @@ int Stream::DoPull(bob::Next<ngtcp2_vec> next,
   }
 
   return outbound_->Pull(std::move(next), options, data, count, max_count_hint);
-}
-
-void Stream::BeginHeaders(HeadersKind kind) {
-  headers_length_ = 0;
-  headers_.clear();
-  set_headers_kind(kind);
-}
-
-void Stream::set_headers_kind(HeadersKind kind) {
-  headers_kind_ = kind;
-}
-
-bool Stream::AddHeader(std::unique_ptr<Header> header) {
-  size_t len = header->length();
-  if (!session_->application().CanAddHeader(
-          headers_.size(), headers_length_, len)) {
-    return false;
-  }
-
-  headers_length_ += len;
-  headers_.push_back(std::move(header));
-  return true;
 }
 
 void Stream::Acknowledge(size_t datalen) {
@@ -1965,42 +1947,6 @@ void Stream::EmitClose(const QuicError& error) {
   MakeCallback(BindingData::Get(env()).stream_close_callback(), 1, &err);
 }
 
-void Stream::EmitHeaders() {
-  STAT_RECORD_TIMESTAMP(Stats, received_at);
-  // state()->wants_headers will be set from the javascript side if the
-  // stream object has a handler for the headers event.
-  if (!env()->can_call_into_js() || !state()->wants_headers) {
-    headers_.clear();
-    return;
-  }
-  CallbackScope<Stream> cb_scope(this);
-
-  auto& binding = BindingData::Get(env());
-  size_t count = headers_.size() * 2;
-  LocalVector<Value> values(env()->isolate(), count);
-
-  for (size_t i = 0; i < headers_.size(); i++) {
-    Local<Value> name;
-    Local<Value> value;
-    if (!headers_[i]->GetName(&binding).ToLocal(&name) ||
-        !headers_[i]->GetValue(&binding).ToLocal(&value)) [[unlikely]] {
-      headers_.clear();
-      return;
-    }
-    values[i * 2] = name;
-    values[i * 2 + 1] = value;
-  }
-
-  headers_.clear();
-
-  Local<Value> argv[] = {
-      Array::New(env()->isolate(), values.data(), count),
-      Integer::NewFromUnsigned(env()->isolate(),
-                               static_cast<uint32_t>(headers_kind_))};
-
-  MakeCallback(binding.stream_headers_callback(), arraysize(argv), argv);
-}
-
 void Stream::EmitReset(const QuicError& error) {
   // state()->wants_reset will be set from the javascript side if the
   // stream object has a handler for the reset event.
@@ -2025,15 +1971,6 @@ void Stream::EmitStopSending(const QuicError& error) {
   MakeCallback(BindingData::Get(env()).stream_stop_sending_callback(), 1, &err);
 }
 
-void Stream::EmitWantTrailers() {
-  // state()->wants_trailers will be set from the javascript side if the
-  // stream object has a handler for the trailers event.
-  if (!env()->can_call_into_js() || !state()->wants_trailers) {
-    return;
-  }
-  CallbackScope<Stream> cb_scope(this);
-  MakeCallback(BindingData::Get(env()).stream_trailers_callback(), 0, nullptr);
-}
 
 // ============================================================================
 
