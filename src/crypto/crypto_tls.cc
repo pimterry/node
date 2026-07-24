@@ -26,6 +26,7 @@
 #include "crypto/crypto_clienthello-inl.h"
 #include "crypto/crypto_common.h"
 #include "crypto/crypto_context.h"
+#include "crypto/crypto_tls_negotiation.h"
 #include "crypto/crypto_util.h"
 #include "debug_utils-inl.h"
 #include "memory_tracker-inl.h"

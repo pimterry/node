@@ -2,6 +2,7 @@
 #include "base_object-inl.h"
 #include "crypto/crypto_bio.h"
 #include "crypto/crypto_common.h"
+#include "crypto/crypto_tls_negotiation.h"
 #include "crypto/crypto_util.h"
 #include "env-inl.h"
 #include "memory_tracker-inl.h"
@@ -1951,7 +1952,7 @@ void SecureContext::SetCipherSuites(const FunctionCallbackInfo<Value>& args) {
   CHECK(args[0]->IsString());
 
   const Utf8Value ciphers(env->isolate(), args[0]);
-  if (!sc->ctx_.setCipherSuites(*ciphers)) {
+  if (!crypto::SetCipherSuites(sc->ctx_.get(), *ciphers)) {
     return ThrowCryptoError(env, ERR_get_error(), "Failed to set ciphers");
   }
 }
@@ -1990,7 +1991,7 @@ void SecureContext::SetECDHCurve(const FunctionCallbackInfo<Value>& args) {
 
   Utf8Value curve(env->isolate(), args[0]);
 
-  if (curve != "auto" && !SSL_CTX_set1_curves_list(sc->ctx_.get(), *curve)) {
+  if (!SetGroups(sc->ctx_.get(), *curve)) {
     return THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to set ECDH curve");
   }
 }
@@ -2191,7 +2192,8 @@ void SecureContext::SetCertificateCompression(
 
   // TLSEXT_comp_cert_limit is the limit for a zero-terminated algs array,
   // total number of available algs is one fewer.
-  constexpr size_t kMaxCompAlgs = TLSEXT_comp_cert_limit - 1;
+  constexpr size_t kMaxCompAlgs =
+      MAX_CERTIFICATE_COMPRESSION_ALGORITHMS;
   if (len == 0 || len > kMaxCompAlgs) {
     return THROW_ERR_INVALID_ARG_VALUE(
         env,
@@ -2200,9 +2202,9 @@ void SecureContext::SetCertificateCompression(
   }
 
   int algs[kMaxCompAlgs];
-  for (size_t i = 0; i < len; i++) {
-    algs[i] = (packed >> (8 * (i + 1))) & 0xff;
-  }
+  CHECK_EQ(DecodeCertificateCompressionAlgorithms(
+               packed, algs, kMaxCompAlgs),
+           len);
   if (!SSL_CTX_set1_cert_comp_preference(
           sc->ctx_.get(), algs, static_cast<size_t>(len))) {
     return THROW_ERR_CRYPTO_OPERATION_FAILED(

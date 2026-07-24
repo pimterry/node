@@ -21,8 +21,10 @@ const { createPrivateKey } = await import('node:crypto');
 
 const key = createPrivateKey(readKey('agent1-key.pem'));
 const cert = readKey('agent1-cert.pem');
+const mixedCiphers =
+  'ECDHE-RSA-AES128-GCM-SHA256:TLS_AES_256_GCM_SHA384';
 
-// Custom ciphers. Use a specific TLS 1.3 cipher suite.
+// Combined cipher expressions are narrowed to TLS 1.3.
 {
   const serverEndpoint = await listen(mustCall(async (serverSession) => {
     const info = await serverSession.opened;
@@ -32,14 +34,14 @@ const cert = readKey('agent1-cert.pem');
   }), {
     sni: { '*': { keys: [key], certs: [cert] } },
     alpn: ['quic-test'],
-    ciphers: 'TLS_AES_256_GCM_SHA384',
+    ciphers: mixedCiphers,
   });
 
   const clientSession = await connect(serverEndpoint.address, {
     alpn: 'quic-test',
     verifyPeer: 'manual',
     servername: 'localhost',
-    ciphers: 'TLS_AES_256_GCM_SHA384',
+    ciphers: mixedCiphers,
   });
 
   const info = await clientSession.opened;
@@ -49,6 +51,12 @@ const cert = readKey('agent1-cert.pem');
   await clientSession.closed;
   await serverEndpoint.close();
 }
+
+// Configuration is rejected when it has no TLS 1.3-compatible intersection.
+await assert.rejects(connect('127.0.0.1:1', {
+  alpn: 'quic-test',
+  ciphers: 'ECDHE-RSA-AES128-GCM-SHA256',
+}), /contains no TLSv1\.3-compatible ciphers/);
 
 // Custom groups. Use a specific key exchange group.
 {
@@ -78,8 +86,9 @@ const cert = readKey('agent1-cert.pem');
 
 // Default ciphers/groups are non-empty strings from constants.
 {
-  strictEqual(typeof constants.DEFAULT_CIPHERS, 'string');
-  ok(constants.DEFAULT_CIPHERS.length > 0);
-  strictEqual(typeof constants.DEFAULT_GROUPS, 'string');
-  ok(constants.DEFAULT_GROUPS.length > 0);
+  strictEqual(constants.DEFAULT_CIPHERS,
+              'TLS_AES_256_GCM_SHA384:' +
+              'TLS_CHACHA20_POLY1305_SHA256:' +
+              'TLS_AES_128_GCM_SHA256');
+  strictEqual(constants.DEFAULT_GROUPS, 'auto');
 }

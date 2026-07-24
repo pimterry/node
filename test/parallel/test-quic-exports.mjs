@@ -27,9 +27,10 @@ strictEqual(quic.constants.cc.RENO, 'reno');
 strictEqual(quic.constants.cc.CUBIC, 'cubic');
 strictEqual(quic.constants.cc.BBR, 'bbr');
 strictEqual(quic.constants.DEFAULT_CIPHERS,
-            'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:' +
-            'TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_CCM_SHA256');
-strictEqual(quic.constants.DEFAULT_GROUPS, 'X25519:P-256:P-384:P-521');
+            'TLS_AES_256_GCM_SHA384:' +
+            'TLS_CHACHA20_POLY1305_SHA256:' +
+            'TLS_AES_128_GCM_SHA256');
+strictEqual(quic.constants.DEFAULT_GROUPS, 'auto');
 
 // Ensure the constants are.. well, constant.
 throws(() => { quic.constants.cc.RENO = 'foo'; }, TypeError);

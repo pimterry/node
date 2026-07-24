@@ -62,6 +62,9 @@ DTLS is designed for UDP transport and differs from TLS in several key ways:
 * Retransmission: DTLS handles handshake retransmission internally since
   UDP does not guarantee delivery.
 
+Node.js DTLS uses DTLS 1.2 exclusively. DTLS 1.0 is deprecated and DTLS 1.3
+is not currently supported by OpenSSL.
+
 ## `dtls.listen(callback, options)`
 
 <!-- YAML
@@ -77,7 +80,9 @@ added: REPLACEME
   * `port` {number} Port to bind to. **Required.**
   * `host` {string} Address to bind to. **Default:** `'0.0.0.0'`.
   * `ca` {string|Buffer|string\[]|Buffer\[]} CA certificates in PEM format.
-  * `ciphers` {string} OpenSSL cipher list string.
+  * `ciphers` {string} OpenSSL cipher expression. TLS 1.3 cipher suites in a
+    combined expression are ignored; the expression must contain at least one
+    cipher compatible with DTLS 1.2.
   * `alpn` {string\[]|Buffer} ALPN protocol names.
   * `srtp` {string} Colon-separated SRTP protection profile names
     (e.g., `'SRTP_AES128_CM_SHA1_80:SRTP_AEAD_AES_128_GCM'`).
@@ -127,6 +132,9 @@ added: REPLACEME
     certificates. **Default:** `true`.
   * `bindHost` {string} Local bind address. **Default:** `'0.0.0.0'`.
   * `bindPort` {number} Local bind port. **Default:** `0` (ephemeral).
+  * `ciphers` {string} OpenSSL cipher expression. TLS 1.3 cipher suites in a
+    combined expression are ignored; the expression must contain at least one
+    cipher compatible with DTLS 1.2.
   * `alpn` {string\[]|Buffer} ALPN protocol names.
   * `srtp` {string} SRTP protection profile names.
   * `mtu` {number} Maximum transmission unit. **Default:** `1200`.

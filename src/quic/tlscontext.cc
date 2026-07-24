@@ -3,6 +3,7 @@
 #ifndef OPENSSL_NO_QUIC
 #include <async_wrap-inl.h>
 #include <base_object-inl.h>
+#include <crypto/crypto_tls_negotiation.h>
 #include <crypto/crypto_util.h>
 #include <debug_utils-inl.h>
 #include <env-inl.h>
@@ -538,14 +539,14 @@ SSLCtxPointer TLSContext::Initialize(Environment* env) {
     SSL_CTX_set_keylog_callback(ctx.get(), OnKeylog);
   }
 
-  if (SSL_CTX_set_ciphersuites(ctx.get(), options_.ciphers.c_str()) != 1) {
+  if (!crypto::SetCipherSuites(ctx.get(), options_.ciphers.c_str())) {
     validation_error_ = "Invalid cipher suite";
-    return SSLCtxPointer();
+    return {};
   }
 
-  if (SSL_CTX_set1_groups_list(ctx.get(), options_.groups.c_str()) != 1) {
+  if (!crypto::SetGroups(ctx.get(), options_.groups.c_str())) {
     validation_error_ = "Invalid cipher groups";
-    return SSLCtxPointer();
+    return {};
   }
 
   {
@@ -608,34 +609,15 @@ SSLCtxPointer TLSContext::Initialize(Environment* env) {
 #ifdef NODE_OPENSSL_HAS_CERT_COMP
   {
     ClearErrorOnReturn clear_error_on_return;
-    SSL_CTX_set1_cert_comp_preference(ctx.get(), nullptr, 0);
-
-    // The JS layer packs (length | alg0<<8 | alg1<<16 | alg2<<24) into a
-    // single uint32. IDs match TLSEXT_comp_cert_zlib (1), _brotli (2),
-    // _zstd (3).
-    const uint32_t packed = options_.certificate_compression;
-    const size_t len = packed & 0xff;
-    if (len > 0) {
-      // TLSEXT_comp_cert_limit bounds the zero-terminated algs array; the
-      // number of usable algorithms is one fewer.
-      constexpr size_t kMaxCompAlgs = TLSEXT_comp_cert_limit - 1;
-      if (len > kMaxCompAlgs) {
-        validation_error_ = "Invalid certificate compression preference";
-        return SSLCtxPointer();
-      }
-      int algs[kMaxCompAlgs];
-      for (size_t i = 0; i < len; i++) {
-        algs[i] = (packed >> (8 * (i + 1))) & 0xff;
-      }
-      if (!SSL_CTX_set1_cert_comp_preference(ctx.get(), algs, len)) {
-        validation_error_ = "Failed to set certificate compression preference";
-        return SSLCtxPointer();
-      }
-      // Pre-compress the loaded certificate(s) for the preferred algorithms.
-      // Returns 0 when no certificate is loaded (e.g. a client context) or
-      // when compression did not reduce the size; both are non-fatal.
-      constexpr int kCompressAllAlgs = 0;
-      SSL_CTX_compress_certs(ctx.get(), kCompressAllAlgs);
+    if ((options_.certificate_compression & 0xff) >
+        crypto::MAX_CERTIFICATE_COMPRESSION_ALGORITHMS) {
+      validation_error_ = "Invalid certificate compression preference";
+      return {};
+    }
+    if (!crypto::ApplyCertificateCompression(
+            ctx.get(), options_.certificate_compression)) {
+      validation_error_ = "Failed to set certificate compression preference";
+      return {};
     }
   }
 #endif  // NODE_OPENSSL_HAS_CERT_COMP

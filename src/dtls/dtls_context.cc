@@ -4,6 +4,7 @@
 #if HAVE_OPENSSL && HAVE_DTLS
 
 #include <base_object-inl.h>
+#include <crypto/crypto_tls_negotiation.h>
 #include <crypto/crypto_util.h>
 #include <env-inl.h>
 #include <memory_tracker-inl.h>
@@ -361,10 +362,8 @@ void DTLSContext::SetECDHCurve(const FunctionCallbackInfo<Value>& args) {
   Utf8Value curve(env->isolate(), args[0]);
 
   // "auto" means use OpenSSL's default curve selection.
-  if (strcmp(*curve, "auto") != 0) {
-    if (!SSL_CTX_set1_curves_list(ctx->ctx_.get(), *curve)) {
-      return THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to set ECDH curve");
-    }
+  if (!crypto::SetGroups(ctx->ctx_.get(), *curve)) {
+    return THROW_ERR_CRYPTO_OPERATION_FAILED(env, "Failed to set ECDH curve");
   }
 }
 

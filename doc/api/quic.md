@@ -580,8 +580,9 @@ is not specified.
 
 * {string}
 
-The default TLS 1.3 key-exchange group list used when
-[`sessionOptions.groups`][] is not specified.
+The default TLS 1.3 key-exchange group policy used when
+[`sessionOptions.groups`][] is not specified. The value is `'auto'`, which
+uses OpenSSL's current default groups.
 
 ## Class: `QuicEndpoint`
 
@@ -2985,7 +2986,9 @@ added: v23.8.0
 
 * Type: {string}
 
-The list of supported TLS 1.3 cipher algorithms.
+An OpenSSL cipher expression. The expression may contain both pre-TLS 1.3
+ciphers and TLS 1.3 cipher suites. QUIC ignores the pre-TLS 1.3 entries and
+requires at least one TLS 1.3 cipher suite.
 
 #### `sessionOptions.crl` (client only)
 
@@ -3017,9 +3020,10 @@ is available. Set to `false` to disable early data support.
 added: v23.8.0
 -->
 
-* Type: {string}
+* Type: {string} **Default:** `'auto'`
 
-The list of supported TLS 1.3 cipher groups.
+The list of supported TLS 1.3 key-exchange groups. The value `'auto'` uses
+OpenSSL's current default groups.
 
 #### `sessionOptions.keylog`
 

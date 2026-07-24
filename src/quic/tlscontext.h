@@ -5,6 +5,7 @@
 #include <base_object.h>
 #include <crypto/crypto_context.h>
 #include <crypto/crypto_keys.h>
+#include <crypto/crypto_tls_negotiation.h>
 #include <memory_tracker.h>
 #include <ncrypto.h>
 #include <ngtcp2/ngtcp2_crypto.h>
@@ -170,11 +171,9 @@ class TLSSession final : public MemoryRetainer {
 class TLSContext final : public MemoryRetainer,
                          public std::enable_shared_from_this<TLSContext> {
  public:
-  static constexpr auto DEFAULT_CIPHERS = "TLS_AES_128_GCM_SHA256:"
-                                          "TLS_AES_256_GCM_SHA384:"
-                                          "TLS_CHACHA20_POLY1305_"
-                                          "SHA256:TLS_AES_128_CCM_SHA256";
-  static constexpr auto DEFAULT_GROUPS = "X25519:P-256:P-384:P-521";
+  static constexpr auto DEFAULT_CIPHERS =
+      crypto::DEFAULT_TLS13_CIPHER_SUITES;
+  static constexpr auto DEFAULT_GROUPS = "auto";
 
   struct Options final : public MemoryRetainer {
     // The SNI servername to use for this session. This option is only used by

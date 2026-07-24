@@ -22,6 +22,8 @@ const { listen, connect } = await import('node:dtls');
 const serverCert = readKey('agent1-cert.pem');
 const serverKey = readKey('agent1-key.pem');
 const ca = readKey('ca1-cert.pem');
+const mixedCiphers =
+  'ECDHE-RSA-AES128-GCM-SHA256:TLS_AES_256_GCM_SHA384';
 
 const serverAlpnChecked = Promise.withResolvers();
 
@@ -37,12 +39,14 @@ const endpoint = listen(mustCall(async (session) => {
   port: 0,
   host: '127.0.0.1',
   alpn: ['coap', 'h2'],
+  ciphers: mixedCiphers,
 });
 
 const session = connect('127.0.0.1', endpoint.address.port, {
   ca: [ca.toString()],
   rejectUnauthorized: false,
   alpn: ['coap'],
+  ciphers: mixedCiphers,
 });
 
 await session.opened;
@@ -54,3 +58,18 @@ await serverAlpnChecked.promise;
 
 await session.close();
 await endpoint.close();
+
+// Cipher expressions are narrowed to the family DTLS supports and rejected
+// only when there is no compatible configuration.
+{
+  const invalidOptions = {
+    cert: serverCert,
+    key: serverKey,
+    port: 0,
+  };
+
+  assert.throws(() => listen(() => {}, {
+    ...invalidOptions,
+    ciphers: 'TLS_AES_256_GCM_SHA384',
+  }), /contains no TLSv1\.2-compatible ciphers/);
+}
