@@ -4,14 +4,22 @@ name: h2-flake-diag
 # flake. All other workflows were deleted on this branch on purpose - this
 # branch is a diagnosis vehicle and must never be merged.
 #
-# Reproduces on macOS (the only platform where CI shows the failure) using
-# PREBUILT nightly tarballs, so no compiling. Runs a 2x2 matrix:
-#   arch    : arm64 (macos-15) and x64 (macos-13)
-#   variant : with-change (Aug 5 nightly) and control (Aug 4 nightly)
-# The control build predates http2: increase default window sizes (1576cb83b49),
-# so a failure that appears only under with-change is attributable to it.
+# macos-15 (arm64) only: the macos-13 x64 runners are retired and never start.
+#
+# Job "confirm" (fast, prebuilt nightlies, ~15 min)
+#   Reproduces the hang and proves the mechanism: with the socket-level
+#   sampler, a hang should show every byte counter frozen while both peers
+#   still have data queued and ~32MB of window to send it in.
+#   control = Aug 4 nightly (predates the window change) -> must stay green.
+#
+# Job "fix-test" (slow, builds from source, ~1h cold / ~15 min cached)
+#   A/B on one build tree: run the probes unpatched, apply the candidate fix
+#   to MaybeStopReading(), rebuild incrementally (one .cc + link), re-run.
+#   Only the second half should come back clean.
 
 on:
+  # Any branch, not a fixed name - this is a throwaway diagnosis branch and
+  # gets renamed. '**' matches all branches but not tags.
   push:
     branches: ['**']
   workflow_dispatch:
@@ -25,19 +33,22 @@ on:
       parallelism:
         description: Concurrent processes (oversubscribe; the flake needs load)
         default: '8'
+      run_fix_test:
+        description: Also build from source and A/B the candidate fix
+        default: 'true'
 
 permissions:
   contents: read
 
 jobs:
-  diag:
-    timeout-minutes: 60
+  confirm:
+    name: confirm (${{ matrix.variant }})
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-13]
         variant: [with-change, control]
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-15
     env:
       TEST_REPEATS: ${{ github.event.inputs.test_repeats || '300' }}
       DIAG_RUNS: ${{ github.event.inputs.diag_runs || '200' }}
@@ -52,7 +63,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ matrix.runner }}" = "macos-13" ]; then ARCH=darwin-x64; else ARCH=darwin-arm64; fi
           if [ "${{ matrix.variant }}" = "with-change" ]; then
             VER=v27.0.0-nightly2026080541afbd30cf
             EXPECT=4194304
@@ -60,7 +70,6 @@ jobs:
             VER=v27.0.0-nightly20260804fb6693eeaa
             EXPECT=65535
           fi
-          echo "arch=$ARCH"     >> "$GITHUB_OUTPUT"
           echo "ver=$VER"       >> "$GITHUB_OUTPUT"
           echo "expect=$EXPECT" >> "$GITHUB_OUTPUT"
 
@@ -69,8 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           VER='${{ steps.resolve.outputs.ver }}'
-          ARCH='${{ steps.resolve.outputs.arch }}'
-          URL="https://nodejs.org/download/nightly/$VER/node-$VER-$ARCH.tar.gz"
+          URL="https://nodejs.org/download/nightly/$VER/node-$VER-darwin-arm64.tar.gz"
           echo "downloading $URL"
           curl -fsSL --retry 3 -o node.tar.gz "$URL"
           mkdir -p nodedist && tar -xzf node.tar.gz -C nodedist --strip-components=1
@@ -89,6 +97,9 @@ jobs:
           fi
           echo "##### MACHINE #####"
           uname -a; sysctl -n hw.ncpu hw.memsize 2>/dev/null || true
+          echo "##### SOCKET BUFFER SIZES (why macOS and not linux) #####"
+          sysctl net.inet.tcp.sendspace net.inet.tcp.recvspace 2>/dev/null || true
+          sysctl net.local.stream.sendspace net.local.stream.recvspace 2>/dev/null || true
 
       - name: 'Probe A: real test under tools/test.py'
         shell: bash
@@ -103,8 +114,6 @@ jobs:
           RC=$?
           set -e
           echo "##### PROBE A RESULT: exit=$RC #####"
-          # A real hang shows as "--- TIMEOUT ---"; crashes print
-          # "--- CRASHED (Signal: N) ---" on non-Windows, so match the prefix only.
           echo "TIMEOUT occurrences : $(grep -c -- '--- TIMEOUT ---' probeA.log || true)"
           echo "CRASHED occurrences : $(grep -c -- '--- CRASHED' probeA.log || true)"
           grep -vE '^\[[0-9]' probeA.log | tail -40
@@ -114,46 +123,16 @@ jobs:
         continue-on-error: true
         run: |
           set -uo pipefail
-          echo "##### PROBE B: diagnostic, ${DIAG_RUNS} runs, ${PAR} concurrent #####"
-          mkdir -p diagout
-          run_one() {
-            i="$1"
-            PIPELINE_DIAG_MS=30000 "$NODE" .github/h2-diag/pipeline-http2-diag.js \
-              > "diagout/run-$i.out" 2>&1
-            echo "$?" > "diagout/run-$i.rc"
-          }
-          export -f run_one
-          seq 1 "$DIAG_RUNS" | xargs -P "$PAR" -I{} bash -c 'run_one {}'
-          HUNG=0; FAILED=0; PASSED=0
-          for f in diagout/*.rc; do
-            rc="$(cat "$f")"
-            case "$rc" in
-              0)  PASSED=$((PASSED+1)) ;;
-              99) HUNG=$((HUNG+1)) ;;
-              *)  FAILED=$((FAILED+1)) ;;
-            esac
-          done
-          echo "##### PROBE B RESULT: hung=$HUNG failed=$FAILED passed=$PASSED total=$DIAG_RUNS #####"
-          n=0
-          for f in diagout/*.rc; do
-            rc="$(cat "$f")"; [ "$rc" = "0" ] && continue
-            n=$((n+1)); [ "$n" -gt 5 ] && break
-            echo "##### PROBE B FAILURE DUMP #$n (rc=$rc) #####"
-            cat "${f%.rc}.out"
-          done
-          echo "$HUNG" > probeB.hung
+          bash .github/h2-diag/run-probe-b.sh "$NODE" "$DIAG_RUNS" "$PAR" diagout
 
       - name: Verdict
         shell: bash
         run: |
           set -uo pipefail
-          # `grep -c` prints 0 AND exits 1 on no-match, so `|| echo 0` would
-          # yield "0\n0" and break the numeric test below. Use `|| true` plus
-          # an empty-string fallback for the file-missing case.
-          HUNG="$(cat probeB.hung 2>/dev/null || true)"; HUNG="${HUNG:-0}"
+          HUNG="$(cat diagout/hung.count 2>/dev/null || true)"; HUNG="${HUNG:-0}"
           TIMEOUTS="$(grep -c -- '--- TIMEOUT ---' probeA.log 2>/dev/null || true)"
           TIMEOUTS="${TIMEOUTS:-0}"
-          echo "##### VERDICT ${{ matrix.runner }} / ${{ matrix.variant }} #####"
+          echo "##### VERDICT confirm / ${{ matrix.variant }} #####"
           echo "probeA_timeouts=$TIMEOUTS probeB_hung=$HUNG"
           if [ "$TIMEOUTS" -gt 0 ] || [ "$HUNG" -gt 0 ]; then
             echo "REPRODUCED"; exit 1
@@ -163,8 +142,153 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: h2-diag-${{ matrix.runner }}-${{ matrix.variant }}
+          name: h2-diag-confirm-${{ matrix.variant }}
           path: |
             probeA.log
             diagout/
+          if-no-files-found: ignore
+
+  fix-test:
+    name: fix-test (build + A/B candidate patch)
+    if: ${{ github.event.inputs.run_fix_test != 'false' }}
+    timeout-minutes: 180
+    runs-on: macos-15
+    env:
+      DIAG_RUNS: ${{ github.event.inputs.diag_runs || '200' }}
+      PAR: ${{ github.event.inputs.parallelism || '8' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install ccache
+        shell: bash
+        run: brew install ccache
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: h2diag-ccache-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            h2diag-ccache-${{ runner.os }}-
+
+      - name: Build baseline (unpatched)
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+          ccache -z || true
+          ./configure --ninja
+          # NOT `make -jN`: with --ninja the Makefile forwards jobs to ninja via
+          # $(filter -j%,$(MAKEFLAGS)), and macOS ships GNU Make 3.81, which puts
+          # a BARE `-j` in MAKEFLAGS. ninja then dies with
+          # "option requires an argument -- 'j'" and prints its usage.
+          # `JOBS=N` takes the Makefile's explicit -j$(JOBS) branch instead.
+          make JOBS="$(sysctl -n hw.ncpu)" node 2>&1 | tail -20
+          test -x out/Release/node || { echo "FATAL: build produced no binary"; exit 1; }
+          echo "NODE=$PWD/out/Release/node" >> "$GITHUB_ENV"
+          ccache -s || true
+
+      - name: Baseline identity + probes
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "##### BASELINE IDENTITY #####"
+          "$NODE" -p "process.version + ' window=' + require('http2').constants.DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE"
+          bash .github/h2-diag/run-probe-b.sh "$NODE" "$DIAG_RUNS" "$PAR" diagout-baseline
+          cp diagout-baseline/hung.count baseline.hung || echo 0 > baseline.hung
+
+      - name: Apply candidate fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "##### CANDIDATE FIX #####"
+          cat .github/h2-diag/candidate-fix.md
+          python3 - <<'PY'
+          import sys
+          p = 'src/node_http2.cc'
+          s = open(p).read()
+
+          # Two sites, and they MUST move together: OnDataChunkReceived asserts
+          # that MaybeStopReading already stopped reading. Patching only the
+          # first aborts with "Assertion failed: session->is_reading_stopped()".
+          edits = [
+            ("  if (want_read == 0 || is_write_in_progress()) {",
+             "  // CANDIDATE FIX under test: stopping unconditionally during a write\n"
+             "  // deadlocks two peers that are both writing. Keep the\n"
+             "  // CVE-2019-9511/9517 bound, but as an explicit memory budget.\n"
+             "  if (want_read == 0 ||\n"
+             "      (is_write_in_progress() && !has_available_session_memory(0))) {"),
+            ("  if (session->is_write_in_progress()) {\n"
+             "    CHECK(session->is_reading_stopped());\n"
+             "    session->set_receive_paused();",
+             "  // Kept consistent with MaybeStopReading: only pause receive\n"
+             "  // processing if we actually stopped reading.\n"
+             "  if (session->is_write_in_progress() && session->is_reading_stopped()) {\n"
+             "    session->set_receive_paused();"),
+          ]
+          for i, (old, new) in enumerate(edits, 1):
+              if old not in s:
+                  print('FATAL: anchor %d not found in %s - source moved' % (i, p))
+                  sys.exit(1)
+              s = s.replace(old, new, 1)
+          open(p, 'w').write(s)
+          print('patch applied (both sites)')
+          PY
+          git --no-pager diff --stat src/node_http2.cc
+
+      - name: Rebuild (incremental) and re-run probes
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          export PATH="/opt/homebrew/opt/ccache/libexec:$PATH"
+          # JOBS=N, not make -jN - see the baseline build step for why.
+          make JOBS="$(sysctl -n hw.ncpu)" node 2>&1 | tail -10
+          test -x out/Release/node || { echo "FATAL: rebuild produced no binary"; exit 1; }
+          echo "##### PATCHED IDENTITY #####"
+          "$NODE" -p "process.version + ' window=' + require('http2').constants.DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE"
+          bash .github/h2-diag/run-probe-b.sh "$NODE" "$DIAG_RUNS" "$PAR" diagout-patched
+          cp diagout-patched/hung.count patched.hung || echo 0 > patched.hung
+
+      - name: 'Probe A on patched build (real test under tools/test.py)'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          set +e
+          python3 tools/test.py --repeat "${{ github.event.inputs.test_repeats || '300' }}" \
+            -j "$PAR" --timeout 45 --mode=release \
+            parallel/test-stream-pipeline-http2 > probeA-patched.log 2>&1
+          set -e
+          echo "##### PROBE A (PATCHED) TIMEOUTs: $(grep -c -- '--- TIMEOUT ---' probeA-patched.log || true) #####"
+
+      - name: Fix verdict
+        shell: bash
+        run: |
+          set -uo pipefail
+          B="$(cat baseline.hung 2>/dev/null || true)"; B="${B:-0}"
+          P="$(cat patched.hung 2>/dev/null || true)"; P="${P:-0}"
+          PT="$(grep -c -- '--- TIMEOUT ---' probeA-patched.log 2>/dev/null || true)"; PT="${PT:-0}"
+          echo "##### FIX VERDICT #####"
+          echo "baseline_hung=$B  patched_hung=$P  patched_probeA_timeouts=$PT"
+          if [ "$B" -eq 0 ]; then
+            echo "INCONCLUSIVE: baseline did not reproduce, so the patch proves nothing"; exit 1
+          fi
+          if [ "$P" -eq 0 ] && [ "$PT" -eq 0 ]; then
+            echo "FIX LOOKS EFFECTIVE"
+          else
+            echo "FIX INEFFECTIVE"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h2-diag-fix-test
+          path: |
+            probeA-patched.log
+            diagout-baseline/
+            diagout-patched/
           if-no-files-found: ignore
