@@ -1,0 +1,170 @@
+name: h2-flake-diag
+
+# TEMPORARY debugging workflow for the parallel/test-stream-pipeline-http2
+# flake. All other workflows were deleted on this branch on purpose - this
+# branch is a diagnosis vehicle and must never be merged.
+#
+# Reproduces on macOS (the only platform where CI shows the failure) using
+# PREBUILT nightly tarballs, so no compiling. Runs a 2x2 matrix:
+#   arch    : arm64 (macos-15) and x64 (macos-13)
+#   variant : with-change (Aug 5 nightly) and control (Aug 4 nightly)
+# The control build predates http2: increase default window sizes (1576cb83b49),
+# so a failure that appears only under with-change is attributable to it.
+
+on:
+  push:
+    branches: ['**']
+  workflow_dispatch:
+    inputs:
+      test_repeats:
+        description: Repeats for probe A (real test under tools/test.py)
+        default: '300'
+      diag_runs:
+        description: Runs for probe B (diagnostic variant)
+        default: '200'
+      parallelism:
+        description: Concurrent processes (oversubscribe; the flake needs load)
+        default: '8'
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-13]
+        variant: [with-change, control]
+    runs-on: ${{ matrix.runner }}
+    env:
+      TEST_REPEATS: ${{ github.event.inputs.test_repeats || '300' }}
+      DIAG_RUNS: ${{ github.event.inputs.diag_runs || '200' }}
+      PAR: ${{ github.event.inputs.parallelism || '8' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Resolve nightly build
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.runner }}" = "macos-13" ]; then ARCH=darwin-x64; else ARCH=darwin-arm64; fi
+          if [ "${{ matrix.variant }}" = "with-change" ]; then
+            VER=v27.0.0-nightly2026080541afbd30cf
+            EXPECT=4194304
+          else
+            VER=v27.0.0-nightly20260804fb6693eeaa
+            EXPECT=65535
+          fi
+          echo "arch=$ARCH"     >> "$GITHUB_OUTPUT"
+          echo "ver=$VER"       >> "$GITHUB_OUTPUT"
+          echo "expect=$EXPECT" >> "$GITHUB_OUTPUT"
+
+      - name: Download prebuilt node
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER='${{ steps.resolve.outputs.ver }}'
+          ARCH='${{ steps.resolve.outputs.arch }}'
+          URL="https://nodejs.org/download/nightly/$VER/node-$VER-$ARCH.tar.gz"
+          echo "downloading $URL"
+          curl -fsSL --retry 3 -o node.tar.gz "$URL"
+          mkdir -p nodedist && tar -xzf node.tar.gz -C nodedist --strip-components=1
+          echo "NODE=$PWD/nodedist/bin/node" >> "$GITHUB_ENV"
+
+      - name: Verify build identity (guards against misattribution)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "##### BUILD IDENTITY #####"
+          "$NODE" -p "'version: ' + process.version"
+          ACTUAL="$("$NODE" -p "require('http2').constants.DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE")"
+          echo "DEFAULT_SETTINGS_INITIAL_WINDOW_SIZE = $ACTUAL (expected ${{ steps.resolve.outputs.expect }})"
+          if [ "$ACTUAL" != "${{ steps.resolve.outputs.expect }}" ]; then
+            echo "FATAL: wrong build - results would be misattributed"; exit 1
+          fi
+          echo "##### MACHINE #####"
+          uname -a; sysctl -n hw.ncpu hw.memsize 2>/dev/null || true
+
+      - name: 'Probe A: real test under tools/test.py'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          mkdir -p out/Release && ln -sf "$NODE" out/Release/node
+          echo "##### PROBE A: real test, real harness, ${TEST_REPEATS} repeats -j ${PAR} #####"
+          set +e
+          python3 tools/test.py --repeat "$TEST_REPEATS" -j "$PAR" --timeout 45 \
+            --mode=release parallel/test-stream-pipeline-http2 > probeA.log 2>&1
+          RC=$?
+          set -e
+          echo "##### PROBE A RESULT: exit=$RC #####"
+          # A real hang shows as "--- TIMEOUT ---"; crashes print
+          # "--- CRASHED (Signal: N) ---" on non-Windows, so match the prefix only.
+          echo "TIMEOUT occurrences : $(grep -c -- '--- TIMEOUT ---' probeA.log || true)"
+          echo "CRASHED occurrences : $(grep -c -- '--- CRASHED' probeA.log || true)"
+          grep -vE '^\[[0-9]' probeA.log | tail -40
+
+      - name: 'Probe B: diagnostic variant (captures stall state)'
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          echo "##### PROBE B: diagnostic, ${DIAG_RUNS} runs, ${PAR} concurrent #####"
+          mkdir -p diagout
+          run_one() {
+            i="$1"
+            PIPELINE_DIAG_MS=30000 "$NODE" .github/h2-diag/pipeline-http2-diag.js \
+              > "diagout/run-$i.out" 2>&1
+            echo "$?" > "diagout/run-$i.rc"
+          }
+          export -f run_one
+          seq 1 "$DIAG_RUNS" | xargs -P "$PAR" -I{} bash -c 'run_one {}'
+          HUNG=0; FAILED=0; PASSED=0
+          for f in diagout/*.rc; do
+            rc="$(cat "$f")"
+            case "$rc" in
+              0)  PASSED=$((PASSED+1)) ;;
+              99) HUNG=$((HUNG+1)) ;;
+              *)  FAILED=$((FAILED+1)) ;;
+            esac
+          done
+          echo "##### PROBE B RESULT: hung=$HUNG failed=$FAILED passed=$PASSED total=$DIAG_RUNS #####"
+          n=0
+          for f in diagout/*.rc; do
+            rc="$(cat "$f")"; [ "$rc" = "0" ] && continue
+            n=$((n+1)); [ "$n" -gt 5 ] && break
+            echo "##### PROBE B FAILURE DUMP #$n (rc=$rc) #####"
+            cat "${f%.rc}.out"
+          done
+          echo "$HUNG" > probeB.hung
+
+      - name: Verdict
+        shell: bash
+        run: |
+          set -uo pipefail
+          # `grep -c` prints 0 AND exits 1 on no-match, so `|| echo 0` would
+          # yield "0\n0" and break the numeric test below. Use `|| true` plus
+          # an empty-string fallback for the file-missing case.
+          HUNG="$(cat probeB.hung 2>/dev/null || true)"; HUNG="${HUNG:-0}"
+          TIMEOUTS="$(grep -c -- '--- TIMEOUT ---' probeA.log 2>/dev/null || true)"
+          TIMEOUTS="${TIMEOUTS:-0}"
+          echo "##### VERDICT ${{ matrix.runner }} / ${{ matrix.variant }} #####"
+          echo "probeA_timeouts=$TIMEOUTS probeB_hung=$HUNG"
+          if [ "$TIMEOUTS" -gt 0 ] || [ "$HUNG" -gt 0 ]; then
+            echo "REPRODUCED"; exit 1
+          fi
+          echo "NOT REPRODUCED"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: h2-diag-${{ matrix.runner }}-${{ matrix.variant }}
+          path: |
+            probeA.log
+            diagout/
+          if-no-files-found: ignore
