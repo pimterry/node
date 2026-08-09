@@ -11,7 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 if (!hasQuic) {
   skip('QUIC is not enabled');
 }
-const { listen, connect } = await import('node:quic');
+const { listenHttp3, connectHttp3 } = await import('node:quic');
 const { createPrivateKey } = await import('node:crypto');
 const { drainableProtocol } = await import('stream/iter');
 
@@ -30,8 +30,9 @@ const BODY = WINDOW - 11;
 let letServerRead;
 const serverMayRead = new Promise((resolve) => { letServerRead = resolve; });
 
-const endpoint = await listen((session) => {
+const endpoint = await listenHttp3((session) => {
   session.onstream = async (stream) => {
+    stream.onheaders = () => { stream.sendHeaders({ ':status': '200' }); };
     await serverMayRead;
     // eslint-disable-next-line no-unused-vars
     for await (const _ of stream) { /* reading extends the window */ }
@@ -42,17 +43,16 @@ const endpoint = await listen((session) => {
     initialMaxStreamDataBidiRemote: WINDOW,
     initialMaxData: 1024 * 1024,
   },
-  onheaders() { this.sendHeaders({ ':status': '200' }); },
 });
 
-const session = await connect(endpoint.address, {
+const session = await connectHttp3(endpoint.address, {
   servername: 'localhost',
   verifyPeer: 'manual',
 });
 await session.opened;
 
 // Budget well above the window, so the window is what stops the writer.
-const stream = await session.createBidirectionalStream({ budget: 1024 * 1024 });
+const stream = await session.request(undefined, { budget: 1024 * 1024 });
 stream.sendHeaders({
   ':method': 'POST',
   ':path': '/',

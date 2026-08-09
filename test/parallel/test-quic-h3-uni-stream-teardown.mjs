@@ -13,7 +13,8 @@ if (!hasQuic) {
 }
 
 const { createPrivateKey } = await import('node:crypto');
-const { listen, connect } = await import('node:http3');
+const { listenHttp3: listen, connectHttp3: connect } =
+  await import('node:quic');
 
 const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');

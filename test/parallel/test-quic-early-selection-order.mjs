@@ -13,11 +13,10 @@ if (!hasQuic) {
 }
 
 const { key, cert, listen, connect } = await import('../common/quic.mjs');
-// Block 1 drives real HTTP/3, so it goes through node:http3 rather than
-// the raw QUIC helper: the h3 ALPN alone no longer installs the
-// application.
-const { listen: listenHttp3, connect: connectHttp3 } =
-  await import('node:http3');
+// Block 1 drives real HTTP/3, so it goes through the HTTP/3 entry points
+// rather than the raw QUIC helper: the h3 ALPN alone no longer installs
+// the application.
+const { listenHttp3, connectHttp3 } = await import('node:quic');
 const { bytes } = await import('stream/iter');
 
 const encoder = new TextEncoder();
