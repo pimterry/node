@@ -1694,6 +1694,10 @@ void Stream::ReceiveStopSending(QuicError error) {
   EmitStopSending(error);
 }
 
+void Stream::RecordReceiveActivity() {
+  STAT_RECORD_TIMESTAMP(Stats, received_at);
+}
+
 void Stream::ReceiveStreamReset(uint64_t final_size, QuicError error) {
   // Importantly, reset stream only impacts the inbound data flow. It has no
   // impact on the outbound data flow. It is essentially a signal that the peer
@@ -1837,7 +1841,6 @@ void Stream::EmitStopSending(const QuicError& error) {
 
   MakeCallback(BindingData::Get(env()).stream_stop_sending_callback(), 1, &err);
 }
-
 
 // ============================================================================
 
