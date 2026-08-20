@@ -8,9 +8,6 @@
 #include <node_sockaddr-inl.h>
 #include <uv.h>
 #include <algorithm>
-#include <mutex>
-#include <string>
-#include <vector>
 #include "application.h"
 #include "defs.h"
 #include "session.h"
@@ -18,43 +15,6 @@
 
 namespace node {
 namespace quic {
-
-// ============================================================================
-// The application factory registry.
-
-namespace {
-struct ApplicationFactoryEntry {
-  std::string name;
-  ApplicationFactory factory;
-};
-// Process-wide registry. Registered once per process at binding
-// initialization (registration is idempotent for repeated binding inits,
-// e.g. workers); intentionally leaked, process lifetime.
-std::mutex application_factories_mutex;
-std::vector<ApplicationFactoryEntry>* application_factories = nullptr;
-}  // namespace
-
-void RegisterApplicationFactory(std::string_view name,
-                                const ApplicationFactory& factory) {
-  DCHECK_NOT_NULL(factory.create);
-  std::lock_guard<std::mutex> lock(application_factories_mutex);
-  if (application_factories == nullptr) {
-    application_factories = new std::vector<ApplicationFactoryEntry>();
-  }
-  for (const auto& entry : *application_factories) {
-    if (entry.factory.create == factory.create) return;
-  }
-  application_factories->push_back({std::string(name), factory});
-}
-
-const ApplicationFactory* FindApplicationFactory(std::string_view name) {
-  std::lock_guard<std::mutex> lock(application_factories_mutex);
-  if (application_factories == nullptr) return nullptr;
-  for (const auto& entry : *application_factories) {
-    if (entry.name == name) return &entry.factory;
-  }
-  return nullptr;
-}
 
 // ============================================================================
 

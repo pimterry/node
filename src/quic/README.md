@@ -58,7 +58,7 @@ carry application data.
 | `endpoint.h/cc`    | `Endpoint` — UDP binding, packet dispatch, retry/validation |
 | `session.h/cc`     | `Session` — QUIC connection state machine (\~4,700 lines)   |
 | `streams.h/cc`     | `Stream`, `Outbound`, `PendingStream` — data flow           |
-| `application.h/cc` | `Session::Application` base + name-keyed factory registry   |
+| `application.h/cc` | `Session::Application` base + `DefaultApplication`          |
 | `http3.h/cc`       | `Http3Application` + `Http3Binding` — nghttp3 integration   |
 
 ### Infrastructure
@@ -136,10 +136,10 @@ re-reading from the source.
 ### Application Abstraction
 
 `Session::Application` is a protocol-agnostic virtual interface that the
-Session delegates protocol-specific behavior to. Implementations register
-under a name via `RegisterApplicationFactory`; a Session installs one from
-its `options.application` option, if the application is known in advance, or
-a consumer attaches one later to wrap the session (see timing below).
+Session delegates protocol-specific behavior to. A Session installs one
+from its `options.application` option (HTTP/3 is the only protocol
+application), if the application is known in advance, or a consumer
+attaches one later to wrap the session (see timing below).
 When no application is requested or attached, the `DefaultApplication` is
 installed once the dynamic-attachment window closes (a stream is created
 or the session becomes active); until then `application_` is null.
@@ -153,7 +153,7 @@ Two implementations currently ship in core:
 * **`DefaultApplication`** (`application.cc`): The protocol-less default.
   Exposes every QUIC stream directly to JavaScript with no additional
   framing and pumps outbound stream data from its own send queue.
-* **`Http3Application`** (`http3.cc`): Registered under the name `http3`.
+* **`Http3Application`** (`http3.cc`): Requested under the name `http3`.
   Wraps `nghttp3_conn` for HTTP/3 framing, header compression (QPACK), and
   stream prioritization. Manages unidirectional control streams internally.
   Its JS-facing capability is **`Http3Binding`**: one weakly session-bound

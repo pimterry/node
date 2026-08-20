@@ -308,7 +308,6 @@ BindingData::BindingData(Realm* realm, Local<Object> object)
   MakeWeak();
   // Unref so the check handle doesn't keep the event loop alive on its own.
   flush_check_.Unref();
-  RegisterHttp3Application();
 }
 
 SessionManager& BindingData::session_manager() {

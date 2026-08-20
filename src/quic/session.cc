@@ -24,6 +24,7 @@
 #include "data.h"
 #include "defs.h"
 #include "endpoint.h"
+#include "http3.h"
 #include "ncrypto.h"
 #include "packet.h"
 #include "preferredaddress.h"
@@ -645,22 +646,19 @@ Maybe<Session::Options> Session::Options::From(Environment* env,
   }
 
   // When an application is requested, parse its settings (supplied by
-  // the application's consumer layer alongside the name) through the
-  // registered factory's parse hook. The result is carried opaquely on
-  // the options; the QUIC core never interprets it.
+  // the application's consumer layer alongside the name). The result is
+  // carried opaquely on the options; the QUIC core never interprets it.
+  // The application option is internal-only and HTTP/3 is the only
+  // protocol application.
   if (!options.application.empty()) {
-    // The application option is internal-only: a missing registration
-    // is a bug in the consumer layer, not a user error.
-    const auto* factory = FindApplicationFactory(options.application);
-    CHECK_NOT_NULL(factory);
-    CHECK_NOT_NULL(factory->parse_settings);
+    CHECK_EQ(options.application, "http3");
     Local<Value> settings_val;
     if (!params->Get(env->context(), state.application_settings_string())
              .ToLocal(&settings_val)) {
       return Nothing<Options>();
     }
     if (!settings_val->IsUndefined()) {
-      if (!factory->parse_settings(env, settings_val)
+      if (!ParseHttp3Settings(env, settings_val)
                .To(&options.application_settings)) {
         return Nothing<Options>();
       }
@@ -2647,9 +2645,9 @@ bool Session::stream_fin_managed_by_application() const {
 std::unique_ptr<Session::Application> Session::SelectApplication() {
   const auto& name = config().options.application;
   if (name.empty()) return nullptr;
-  const auto* factory = FindApplicationFactory(name);
-  CHECK_NOT_NULL(factory);
-  return factory->create(this);
+  // HTTP/3 is the only protocol application.
+  CHECK_EQ(name, "http3");
+  return CreateHttp3Application(this);
 }
 
 void Session::InstallApplication() {

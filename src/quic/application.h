@@ -3,7 +3,6 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include <memory>
-#include <string_view>
 
 #include "base_object.h"
 #include "bindingdata.h"
@@ -177,32 +176,6 @@ class Session::Application : public MemoryRetainer {
  private:
   Session* session_ = nullptr;
 };
-
-// The registration record for a protocol-specific Session::Application
-// implementation. Protocols register themselves under a name at binding
-// initialization (e.g. "http3"); a session installs one only when its
-// options request that name explicitly. The settings produced and
-// consumed by these hooks are opaque to the QUIC core: only the
-// registering protocol knows their shape or field names.
-struct ApplicationFactory {
-  // Creates the Application for the given session. Any parsed settings
-  // holder produced by parse_settings is carried on the session's
-  // options (application_settings); implementations resolve it from
-  // there (using their defaults when it is nullptr).
-  std::unique_ptr<Session::Application> (*create)(Session* session) = nullptr;
-
-  // Parses the application-specific settings value, supplied through an
-  // internal symbol by the application's consumer layer (e.g.
-  // the HTTP/3 JS layer), into an opaque holder carried on Session::Options.
-  // Called while session options are processed; invalid user-supplied
-  // values should throw and return Nothing.
-  v8::Maybe<std::shared_ptr<void>> (*parse_settings)(
-      Environment* env, v8::Local<v8::Value> value) = nullptr;
-};
-void RegisterApplicationFactory(std::string_view name,
-                                const ApplicationFactory& factory);
-// Returns the factory registered under name, or nullptr.
-const ApplicationFactory* FindApplicationFactory(std::string_view name);
 
 // Create a DefaultApplication for the given session.
 std::unique_ptr<Session::Application> CreateDefaultApplication(

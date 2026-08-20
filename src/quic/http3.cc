@@ -2105,6 +2105,7 @@ Http3Settings ResolveHttp3Settings(const Session::Options& options) {
                    options.application_settings)
              : Http3Settings();
 }
+}  // namespace
 
 std::unique_ptr<Session::Application> CreateHttp3Application(Session* session) {
   Debug(session, "Installing HTTP/3 application");
@@ -2120,16 +2121,6 @@ Maybe<std::shared_ptr<void>> ParseHttp3Settings(Environment* env,
   }
   return Just(std::static_pointer_cast<void>(
       std::make_shared<Http3Settings>(settings)));
-}
-
-}  // namespace
-
-void RegisterHttp3Application() {
-  RegisterApplicationFactory("http3",
-                             {
-                                 .create = CreateHttp3Application,
-                                 .parse_settings = ParseHttp3Settings,
-                             });
 }
 
 }  // namespace quic

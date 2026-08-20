@@ -3,16 +3,17 @@
 #if defined(NODE_WANT_INTERNALS) && NODE_WANT_INTERNALS
 
 #include <v8.h>
+#include <memory>
+#include "application.h"
+#include "session.h"
 
 namespace node {
 class ExternalReferenceRegistry;
 namespace quic {
 
-// Registers the HTTP/3 application factory (creation, settings parsing,
-// and session-ticket hooks) under the name "http3". Called once at
-// binding initialization; a session installs the application only when
-// its options request that name explicitly (set by the HTTP/3 JS layer).
-void RegisterHttp3Application();
+v8::Maybe<std::shared_ptr<void>> ParseHttp3Settings(Environment* env,
+                                                    v8::Local<v8::Value> value);
+std::unique_ptr<Session::Application> CreateHttp3Application(Session* session);
 
 void CreateHttp3Handle(const v8::FunctionCallbackInfo<v8::Value>& args);
 
