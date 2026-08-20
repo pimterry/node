@@ -26,10 +26,10 @@ const { getQuicSessionState } = require('internal/quic/quic');
 const serverOpened = Promise.withResolvers();
 
 const serverEndpoint = await listen(mustCall(async (serverSession) => {
-  // ALPN negotiated h3, but with no application requested this is a RAW
-  // session: no protocol application is installed.
+  // ALPN negotiated h3, but with no application requested none has been
+  // selected yet: the attachment window is still open (type 0).
   assert.strictEqual(serverSession.alpnProtocol, 'h3');
-  assert.strictEqual(getQuicSessionState(serverSession).hasApplication, false);
+  assert.strictEqual(getQuicSessionState(serverSession).applicationType, 0);
   const info = await serverSession.opened;
   assert.strictEqual(info.protocol, 'h3');
   serverOpened.resolve();
@@ -54,8 +54,9 @@ const clientSession = await connect(serverEndpoint.address, {
 async function checkClient() {
   const info = await clientSession.opened;
   assert.strictEqual(info.protocol, 'h3');
-  // Still a raw session:
-  assert.strictEqual(getQuicSessionState(clientSession).hasApplication, false);
+  // The handshake completed without an HTTP/3 attach, so the
+  // DefaultApplication (type 1) was installed.
+  assert.strictEqual(getQuicSessionState(clientSession).applicationType, 1);
 }
 
 await Promise.all([serverOpened.promise, checkClient()]);

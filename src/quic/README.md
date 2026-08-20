@@ -25,9 +25,9 @@ The stack is layered as:
 ```
 
 An **Endpoint** binds a UDP socket and dispatches incoming packets to
-**Sessions**. Each Session wraps an `ngtcp2_conn` and may delegate
-protocol-specific behavior to an optional **Application**. With no
-Application, the Session handles raw streams itself. Sessions contain
+**Sessions**. Each Session wraps an `ngtcp2_conn` and delegates
+protocol-specific behavior to an **Application** (the protocol-less
+`DefaultApplication` when none is chosen explicitly). Sessions contain
 **Streams** — bidirectional or unidirectional data channels that
 carry application data.
 
@@ -140,15 +140,19 @@ Session delegates protocol-specific behavior to. Implementations register
 under a name via `RegisterApplicationFactory`; a Session installs one from
 its `options.application` option, if the application is known in advance, or
 a consumer attaches one later to wrap the session (see timing below).
-When no application is requested or attached, the Session runs a native
-raw-stream path itself.
+When no application is requested or attached, the `DefaultApplication` is
+installed once the dynamic-attachment window closes (a stream is created
+or the session becomes active); until then `application_` is null.
 
 In effect, an Application acts as an optimization layer for built-in protocols
 like HTTP/3: instead of working entirely through the JS interface, it
 integrates at the C++ layer for performance and low-level control.
 
-One implementation currently ships in core:
+Two implementations currently ship in core:
 
+* **`DefaultApplication`** (`application.cc`): The protocol-less default.
+  Exposes every QUIC stream directly to JavaScript with no additional
+  framing and pumps outbound stream data from its own send queue.
 * **`Http3Application`** (`http3.cc`): Registered under the name `http3`.
   Wraps `nghttp3_conn` for HTTP/3 framing, header compression (QPACK), and
   stream prioritization. Manages unidirectional control streams internally.
@@ -198,13 +202,16 @@ succeed but memory tracking is silently skipped.
 **Client**: `Endpoint::Connect()` builds a `Session::Config` with
 `Side::CLIENT`, creates a `TLSContext`, and calls `Session::Create()` →
 `ngtcp2_conn_client_new()`. An Application configured statically is
-installed immediately, or alternatively consumers can install one later.
+installed immediately; otherwise a consumer can attach one until the
+first stream is created or the handshake completes, at which point the
+`DefaultApplication` is installed instead.
 
 **Server**: `Endpoint::Receive()` processes an Initial packet through
 address validation (retry tokens, LRU cache), then calls `Session::Create()`
 → `ngtcp2_conn_server_new()`. An Application configured statically is
-installed during the initial handshake; otherwise a consumer may install
-one in the session-delivery tick.
+installed during the initial handshake; otherwise a consumer may attach
+one in the session-delivery tick, after which the `DefaultApplication` is
+installed instead.
 
 ### Server handshake ordering
 

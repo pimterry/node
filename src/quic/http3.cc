@@ -399,6 +399,10 @@ class Http3Application final : public Session::Application {
   // ==========================================================================
   // Session::Application
 
+  Session::Application::Type type() const override {
+    return Session::Application::Type::HTTP3;
+  }
+
   error_code GetNoErrorCode() const override { return NGHTTP3_H3_NO_ERROR; }
 
   // HTTP/3 defines H3_INTERNAL_ERROR (0x102) for non-specific failures
@@ -1930,8 +1934,10 @@ void CreateHttp3Handle(const FunctionCallbackInfo<Value>& args) {
     return;
   }
 
-  if (!session->has_application()) {
-    if (session->is_active() || session->has_streams()) {
+  if (!session->has_application() ||
+      session->application().type() != Session::Application::Type::HTTP3) {
+    if (session->has_application() || session->is_active() ||
+        session->has_streams()) {
       THROW_ERR_INVALID_STATE(
           session->env(),
           "An application can only be attached to a QUIC session before it "

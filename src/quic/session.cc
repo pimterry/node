@@ -135,7 +135,7 @@ uint64_t MaxDatagramPayload(uint64_t max_frame_size) {
   V(STREAM_OPEN_ALLOWED, stream_open_allowed, uint8_t)                         \
   V(WRAPPED, wrapped, uint8_t)                                                 \
   V(IS_SERVER, is_server, uint8_t)                                             \
-  V(HAS_APPLICATION, has_application, uint8_t)                                 \
+  V(APPLICATION_TYPE, application_type, uint8_t)                               \
   V(NO_ERROR_CODE, no_error_code, error_code)                                  \
   V(INTERNAL_ERROR_CODE, internal_error_code, error_code)                      \
   V(MAX_DATAGRAM_SIZE, max_datagram_size, uint16_t)                            \
@@ -800,11 +800,6 @@ struct Session::Impl final : public MemoryRetainer {
   PendingStream::PendingStreamQueue pending_bidi_stream_queue_;
   PendingStream::PendingStreamQueue pending_uni_stream_queue_;
 
-  // The native send queue used when no application is installed: streams
-  // with pending outbound data are scheduled here and the send pump
-  // pulls from them directly.
-  Stream::Queue stream_queue_;
-
   // When true, the handshake is deferred until the first stream or
   // datagram is sent. This is set for client sessions with a session
   // ticket, enabling 0-RTT: the first send triggers the handshake
@@ -1279,7 +1274,7 @@ struct Session::Impl final : public MemoryRetainer {
     // the datalen as our accounting does not track the offset and
     // acknowledges should never come out of order here.
     if (datalen == 0) return NGTCP2_SUCCESS;
-    return session->AcknowledgeStreamData(stream_id, datalen)
+    return session->application().AcknowledgeStreamData(stream_id, datalen)
                ? NGTCP2_SUCCESS
                : NGTCP2_ERR_CALLBACK_FAILURE;
   }
@@ -1360,14 +1355,7 @@ struct Session::Impl final : public MemoryRetainer {
                                        void* stream_user_data) {
     NGTCP2_CALLBACK_SCOPE(session)
     if (auto* stream = Stream::From(stream_user_data)) {
-      if (session->impl_->application_) {
-        session->application().ExtendMaxStreamData(stream, max_data);
-      } else {
-        // Native path: the peer granted more flow control for this
-        // stream. Re-schedule it so SendPendingData resumes writing.
-        stream->UpdateWriteDesiredSize();  // might be blocked on js side
-        stream->Schedule(&session->impl_->stream_queue_);
-      }
+      session->application().ExtendMaxStreamData(stream, max_data);
     }
     return NGTCP2_SUCCESS;
   }
@@ -1461,8 +1449,9 @@ struct Session::Impl final : public MemoryRetainer {
 
     if (level != NGTCP2_ENCRYPTION_LEVEL_1RTT) return NGTCP2_SUCCESS;
 
-    // With no application installed there is nothing to start; the
-    // native raw-stream path needs no startup.
+    // With no application installed yet (the dynamic-attachment window
+    // is still open, e.g. a client that has not created any streams)
+    // there is nothing to start.
     if (!session->impl_->application_) return NGTCP2_SUCCESS;
 
     // If the application was already started via on_receive_tx_key
@@ -1513,17 +1502,21 @@ struct Session::Impl final : public MemoryRetainer {
                  NGTCP2_STREAM_DATA_FLAG_0RTT,
     };
 
-    // We received data for a stream! When an application is installed,
-    // the data is passed to it for processing: the application decides
-    // whether this is control stream data (something it handles on its
-    // own) or user stream data (something we should create a Stream
-    // handle for that is passed out to JavaScript). HTTP3, for instance,
-    // will generally create three control streams in either direction
-    // and we want to make sure those are never exposed to users and that
-    // we don't waste time creating Stream handles for them. With no
-    // application installed, the native path delivers every stream's
-    // data straight to its Stream handle.
-    if (!session->ReceiveStreamData(
+    // We received data for a stream! What we don't know yet at this point
+    // is whether the application wants us to treat this as a control stream
+    // data (something the application will handle on its own) or a user stream
+    // data (something that we should create a Stream handle for that is passed
+    // out to JavaScript). HTTP3, for instance, will generally create three
+    // control stream in either direction and we want to make sure those are
+    // never exposed to users and that we don't waste time creating Stream
+    // handles for them. So, what we do here is pass the stream data on to the
+    // application for processing. If it ends up being a user stream, the
+    // application will handle creating the Stream handle and passing that off
+    // to the JavaScript side. An incoming stream also closes the
+    // dynamic-attachment window, installing the DefaultApplication first if
+    // no application has been attached.
+    if (!session->EnsureApplication() ||
+        !session->application().ReceiveStreamData(
             stream_id, data, datalen, data_flags, stream_user_data)) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
@@ -1548,10 +1541,10 @@ struct Session::Impl final : public MemoryRetainer {
     }
 
     // With no application installed there are two cases. If none was
-    // requested, the native raw-stream path needs no startup. If one
-    // was requested but is absent here, installation failed (e.g. ALPN
-    // mismatch, or the session ticket data was rejected) and the
-    // handshake must fail.
+    // requested, the dynamic-attachment window is simply still open and
+    // there is nothing to start. If one was requested but is absent
+    // here, installation failed (e.g. ALPN mismatch, or the session
+    // ticket data was rejected) and the handshake must fail.
     if (!session->impl_->application_) {
       return session->config().options.application.empty()
                  ? NGTCP2_SUCCESS
@@ -1603,21 +1596,21 @@ struct Session::Impl final : public MemoryRetainer {
     NGTCP2_CALLBACK_SCOPE(session)
     auto* stream = Stream::From(stream_user_data);
     if (stream == nullptr) return NGTCP2_SUCCESS;
-    QuicError error = (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET)
-                          ? QuicError::ForApplication(app_error_code)
-                          : QuicError();
-    if (session->impl_->application_) {
-      session->application().ReceiveStreamClose(stream, std::move(error));
+    if (flags & NGTCP2_STREAM_CLOSE_FLAG_APP_ERROR_CODE_SET) {
+      session->application().ReceiveStreamClose(
+          stream, QuicError::ForApplication(app_error_code));
     } else {
-      // Native path: just destroy the stream.
-      stream->Destroy(std::move(error));
+      session->application().ReceiveStreamClose(stream);
     }
     return NGTCP2_SUCCESS;
   }
 
   static int on_stream_open(ngtcp2_conn* conn, stream_id id, void* user_data) {
     NGTCP2_CALLBACK_SCOPE(session)
-    if (!session->ReceiveStreamOpen(id)) {
+    // An incoming stream closes the dynamic-attachment window, installing
+    // the DefaultApplication first if no application has been attached.
+    if (!session->EnsureApplication() ||
+        !session->application().ReceiveStreamOpen(id)) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
     }
     return NGTCP2_SUCCESS;
@@ -1632,13 +1625,8 @@ struct Session::Impl final : public MemoryRetainer {
     NGTCP2_CALLBACK_SCOPE(session)
     auto* stream = Stream::From(stream_user_data);
     if (stream == nullptr) return NGTCP2_SUCCESS;
-    if (session->impl_->application_) {
-      session->application().ReceiveStreamReset(
-          stream, final_size, QuicError::ForApplication(app_error_code));
-    } else {
-      stream->ReceiveStreamReset(final_size,
-                                 QuicError::ForApplication(app_error_code));
-    }
+    session->application().ReceiveStreamReset(
+        stream, final_size, QuicError::ForApplication(app_error_code));
     return NGTCP2_SUCCESS;
   }
 
@@ -1650,12 +1638,8 @@ struct Session::Impl final : public MemoryRetainer {
     NGTCP2_CALLBACK_SCOPE(session)
     auto* stream = Stream::From(stream_user_data);
     if (stream == nullptr) return NGTCP2_SUCCESS;
-    if (session->impl_->application_) {
-      session->application().ReceiveStreamStopSending(
-          stream, QuicError::ForApplication(app_error_code));
-    } else {
-      stream->ReceiveStopSending(QuicError::ForApplication(app_error_code));
-    }
+    session->application().ReceiveStreamStopSending(
+        stream, QuicError::ForApplication(app_error_code));
     return NGTCP2_SUCCESS;
   }
 
@@ -1672,15 +1656,7 @@ struct Session::Impl final : public MemoryRetainer {
     if (session->impl_->application_) {
       session->application().EarlyDataRejected();
     } else {
-      // Native path: destroy all streams opened during the 0-RTT phase
-      // (ngtcp2 has already discarded their internal state) and notify
-      // JS. Use the internal error code since this is an error condition
-      // (code 0 would be treated as a clean close).
-      session->DestroyAllStreams(
-          QuicError::ForApplication(NGTCP2_INTERNAL_ERROR));
-      if (!session->is_destroyed()) {
-        session->EmitEarlyDataRejected();
-      }
+      session->EmitEarlyDataRejected();
     }
     return NGTCP2_SUCCESS;
   }
@@ -2063,10 +2039,11 @@ void Session::SendPendingData() {
       return Close(CloseMethod::SILENT);
     }
 
-    // The stream_data is the next block of data from the application
-    // layer (or, with no application installed, from the session's own
-    // native send queue).
-    if (GetStreamData(&stream_data) < 0) {
+    // The stream_data is the next block of data from the application stream.
+    // During the dynamic-attachment window there is no application and no
+    // streams, so there is never stream data; handshake and ACK frames can
+    // still be serialized below.
+    if (impl_->application_ && application().GetStreamData(&stream_data) < 0) {
       Debug(this, "Application failed to get stream data");
       SetLastError(QuicError::ForNgtcp2Error(NGTCP2_ERR_INTERNAL));
       closed = true;
@@ -2103,7 +2080,7 @@ void Session::SendPendingData() {
             "Session accepted %zu bytes from stream %" PRIi64 " into packet",
             ndatalen,
             stream_data.id);
-      if (!StreamCommit(&stream_data, ndatalen)) {
+      if (!application().StreamCommit(&stream_data, ndatalen)) {
         // Data was accepted into the packet, but for some reason adjusting
         // the stream's committed data failed. Treat as fatal.
         Debug(this, "Failed to commit accepted bytes in stream");
@@ -2130,17 +2107,13 @@ void Session::SendPendingData() {
     // SendPendingData retries it. Without this, a FIN-only send that
     // hits nwrite=0 is lost forever — the stream already returned EOS
     // from Pull and won't be re-scheduled by anyone else.
-    // We resume the stream directly (not via Session::ResumeStream) to
-    // avoid creating a SendPendingDataScope - we're already inside
+    // We call Application::ResumeStream directly (not Session::ResumeStream)
+    // to avoid creating a SendPendingDataScope — we're already inside
     // SendPendingData and re-entering would just hit nwrite=0 again.
     if (nwrite == 0 && (stream_data.id >= 0 || !HasPendingDatagrams())) {
       Debug(this, "Congestion or not our turn to send");
       if (stream_data.id >= 0 && (stream_data.count > 0 || stream_data.fin)) {
-        if (impl_->application_) {
-          application().ResumeStream(stream_data.id);
-        } else {
-          ScheduleStream(stream_data.id);
-        }
+        application().ResumeStream(stream_data.id);
       }
       return;
     }
@@ -2178,15 +2151,8 @@ void Session::SendPendingData() {
           }
           // Notify the application that the stream's write side is shut
           // so it stops queuing data. Without this, GetStreamData would
-          // keep returning the same stream and we'd loop forever. The
-          // native path unschedules the stream directly for the same
-          // reason: EndWritable caps the outbound queue but does not
-          // drop data that was already buffered.
-          if (impl_->application_) {
-            application().StreamWriteShut(stream_data.id);
-          } else if (stream_data.stream) [[likely]] {
-            stream_data.stream->Unschedule();
-          }
+          // keep returning the same stream and we'd loop forever.
+          application().StreamWriteShut(stream_data.id);
           continue;
         }
         case NGTCP2_ERR_WRITE_MORE: {
@@ -2297,183 +2263,6 @@ ssize_t Session::WriteVStream(PathStorage* path,
                                    ts);
 }
 
-int Session::GetStreamData(StreamData* stream_data) {
-  if (impl_->application_) {
-    return application().GetStreamData(stream_data);
-  }
-
-  // The native raw-stream path: pull the next block of data from the
-  // first stream scheduled on the session's own send queue.
-
-  // Reset the state of stream_data before proceeding...
-  stream_data->id = -1;
-  stream_data->count = 0;
-  stream_data->fin = false;
-  stream_data->stream.reset();
-  Debug(this, "Session getting stream data (native path)");
-  DCHECK_NOT_NULL(stream_data);
-
-  // If the connection-level flow control window is exhausted,
-  // there is no point in pulling stream data.
-  if (!max_data_left()) return 0;
-  // If the queue is empty, there aren't any streams with data yet.
-  if (impl_->stream_queue_.IsEmpty()) return 0;
-
-  Stream* stream = impl_->stream_queue_.PopFront();
-  CHECK_NOT_NULL(stream);
-  stream_data->stream.reset(stream);
-  stream_data->id = stream->id();
-  auto next =
-      [&](int status, const ngtcp2_vec* data, size_t count, bob::Done done) {
-        switch (status) {
-          case bob::Status::STATUS_BLOCK:
-            // Fall through
-          case bob::Status::STATUS_WAIT:
-            return;
-          case bob::Status::STATUS_EOS:
-            stream_data->fin = true;
-        }
-
-        // It is possible that the data pointers returned are not actually
-        // the data pointers in the stream_data. If that's the case, we need
-        // to copy over the pointers.
-        count = std::min(count, kMaxVectorCount);
-        ngtcp2_vec* dest = *stream_data;
-        if (dest != data) {
-          for (size_t n = 0; n < count; n++) {
-            dest[n] = data[n];
-          }
-        }
-
-        stream_data->count = count;
-
-        if (count > 0) {
-          stream->Schedule(&impl_->stream_queue_);
-        }
-
-        // Not calling done here because we defer committing
-        // the data until after we're sure it's written.
-      };
-
-  if (!stream->is_eos()) [[likely]] {
-    int ret = stream->Pull(std::move(next),
-                           bob::Options::OPTIONS_SYNC,
-                           stream_data->data,
-                           arraysize(stream_data->data),
-                           kMaxVectorCount);
-    if (ret == bob::Status::STATUS_EOS) {
-      stream_data->fin = true;
-    }
-  } else {
-    stream_data->fin = true;
-  }
-
-  return 0;
-}
-
-bool Session::StreamCommit(StreamData* stream_data, size_t datalen) {
-  if (impl_->application_) {
-    return application().StreamCommit(stream_data, datalen);
-  }
-  DCHECK_NOT_NULL(stream_data);
-  CHECK(stream_data->stream);
-  stream_data->stream->Commit(datalen, stream_data->fin);
-  return true;
-}
-
-bool Session::AcknowledgeStreamData(stream_id id, size_t datalen) {
-  if (impl_->application_) {
-    return application().AcknowledgeStreamData(id, datalen);
-  }
-  if (auto stream = FindStream(id)) [[likely]] {
-    stream->Acknowledge(datalen);
-  }
-  // Returning true even when the stream is not found is intentional.
-  // After a stream is destroyed, the peer can still ACK data that was
-  // previously sent. This is benign and should not be treated as an error.
-  return true;
-}
-
-bool Session::ReceiveStreamOpen(stream_id id) {
-  if (impl_->application_) {
-    return application().ReceiveStreamOpen(id);
-  }
-  // Native path: create (and announce) a Stream for every remote stream.
-  auto stream = CreateStream(id);
-  if (!stream || is_destroyed()) [[unlikely]] {
-    // We couldn't create the stream, or the session was destroyed
-    // during the onstream callback (via MakeCallback re-entrancy).
-    return !is_destroyed();
-  }
-  return true;
-}
-
-bool Session::ReceiveStreamData(stream_id id,
-                                const uint8_t* data,
-                                size_t datalen,
-                                const Stream::ReceiveDataFlags& flags,
-                                void* stream_user_data) {
-  if (impl_->application_) {
-    return application().ReceiveStreamData(
-        id, data, datalen, flags, stream_user_data);
-  }
-
-  // Native path: deliver the data straight to the Stream handle,
-  // implicitly creating it if this is the first time we see the stream.
-
-  // Returns the connection-level flow control credit for bytes delivered here
-  // but discarded without ever reaching a Stream. Dropping them silently would
-  // permanently shrink the session's shared receive window.
-  const auto return_connection_credit = [&] {
-    if (datalen == 0 || is_destroyed()) return;
-    SendPendingDataScope send_scope(this);
-    ExtendOffset(datalen);
-  };
-
-  BaseObjectPtr<Stream> stream;
-  if (stream_user_data == nullptr) {
-    // A locally-initiated stream only exists because we created it, so a
-    // missing Stream means we already destroyed it. Data the peer had put in
-    // flight must not resurrect it as a bogus "incoming" stream. Discard it
-    // and return its credit instead. The is_destroyed() check must come
-    // first: an earlier callback in this same ngtcp2 batch may have
-    // destroyed the session, after which none of this may be touched.
-    if (!is_destroyed() && ngtcp2_conn_is_local_stream(*this, id)) {
-      Debug(this,
-            "Discarding %zu bytes for destroyed local stream %" PRIi64,
-            datalen,
-            id);
-      return_connection_credit();
-      return true;
-    }
-
-    stream = CreateStream(id);
-    if (!stream || is_destroyed()) [[unlikely]] {
-      // We couldn't create the stream, or the session was destroyed
-      // during the onstream callback (via MakeCallback re-entrancy).
-      return false;
-    }
-
-    // The stream was created but immediately destroyed, either because there
-    // is no onstream handler or because the handler destroyed it. Nothing
-    // will consume the data, so discard it and return its credit.
-    if (stream->is_destroyed()) [[unlikely]] {
-      return_connection_credit();
-      return true;
-    }
-  } else {
-    stream = BaseObjectPtr<Stream>(Stream::From(stream_user_data));
-    if (!stream) {
-      Debug(this, "Failed to get existing stream from user data");
-      return false;
-    }
-  }
-
-  CHECK(stream);
-  stream->ReceiveData(data, datalen, flags);
-  return true;
-}
-
 // ============================================================================
 BaseObjectPtr<Session> Session::Create(
     Endpoint* endpoint,
@@ -2499,10 +2288,10 @@ Session::Session(Endpoint* endpoint,
   DCHECK(impl_);
   STAT_RECORD_TIMESTAMP(Stats, created_at);
 
-  // The native (no application) error codes. With no application
-  // installed, "no error" is 0x0 and the non-specific failure code is
-  // the QUIC transport-level INTERNAL_ERROR (0x1) used by ngtcp2 for
-  // unspecified failures. An installed application overrides these in
+  // The default error codes. With no application installed yet, "no
+  // error" is 0x0 and the non-specific failure code is the QUIC
+  // transport-level INTERNAL_ERROR (0x1) used by ngtcp2 for unspecified
+  // failures. An installed application overrides these in
   // SetApplication().
   impl_->state()->no_error_code = NGTCP2_NO_ERROR;
   impl_->state()->internal_error_code = NGTCP2_INTERNAL_ERROR;
@@ -2512,7 +2301,9 @@ Session::Session(Endpoint* endpoint,
   // For clients, install the requested Application immediately - it is
   // known upfront from the options. For servers, application_ stays
   // null until the ClientHello names a protocol. Sessions that request
-  // no application never install one and run the native raw-stream path.
+  // no application stay unset until the dynamic-attachment window closes,
+  // at which point EnsureApplication() installs the DefaultApplication
+  // (unless a protocol application was attached first).
   if (config.side == Side::CLIENT) {
     InstallApplication();
   }
@@ -2861,18 +2652,14 @@ bool Session::can_send_pending_data() const {
   // A session that requested an application must not run the send pump
   // before the application is installed: the application owns stream
   // scheduling from its first flight. With no application requested the
-  // native path is always ready.
+  // pump is always ready (during the dynamic-attachment window it only
+  // serializes handshake and ACK frames).
   return impl_->application_ != nullptr || config().options.application.empty();
 }
 
 bool Session::stream_fin_managed_by_application() const {
   return impl_->application_ != nullptr &&
          impl_->application_->stream_fin_managed_by_application();
-}
-
-error_code Session::internal_error_code() const {
-  DCHECK(!is_destroyed());
-  return impl_->state()->internal_error_code;
 }
 
 std::unique_ptr<Session::Application> Session::SelectApplication() {
@@ -2887,8 +2674,9 @@ void Session::InstallApplication() {
   // Acting on the ClientHello twice would install a second Application over
   // a live one; TLSSession::EarlySelection is what prevents that.
   CHECK(!has_application());
-  // Sessions that request no application install nothing and run the
-  // native raw-stream path.
+  // Sessions that request no application install nothing here: their
+  // dynamic-attachment window stays open until EnsureApplication() closes
+  // it with the DefaultApplication.
   if (auto app = SelectApplication()) SetApplication(std::move(app));
 }
 
@@ -2899,10 +2687,23 @@ void Session::SetEarlyRemoteTransportParams(std::span<const uint8_t> params) {
       *this, params.data(), params.size()));
 }
 
+bool Session::EnsureApplication() {
+  if (impl_->application_) [[likely]] {
+    return true;
+  }
+  // An application requested by name should already have installed; if it
+  // is absent here it failed to do so and the handshake is failing.
+  if (!config().options.application.empty()) {
+    return false;
+  }
+  SetApplication(CreateDefaultApplication(this));
+  return true;
+}
+
 void Session::SetApplication(std::unique_ptr<Application> app) {
   DCHECK(!impl_->application_);
   DCHECK(app);
-  impl_->state()->has_application = 1;
+  impl_->state()->application_type = static_cast<uint8_t>(app->type());
   // Surface the application's "no error" and "internal error" codes via
   // session state so that JS-side code (e.g. the stream writer's fail()
   // path) can resolve the right wire code for the installed application
@@ -3460,6 +3261,11 @@ MaybeLocal<Object> Session::OpenStream(Direction direction,
   if (!can_create_streams()) [[unlikely]]
     return {};
 
+  // Creating a stream (even a pending one) closes the dynamic-attachment
+  // window.
+  if (!EnsureApplication()) [[unlikely]]
+    return {};
+
   // If can_open_streams() returns false, we are able to create streams but
   // they will remain in a pending state. The implication is that the session
   // TLS handshake is still progressing. Note that when a pending stream is
@@ -3592,7 +3398,7 @@ void Session::RemoveStream(stream_id id) {
 
   ngtcp2_conn_set_stream_user_data(*this, id, nullptr);
 
-  if (impl_->application_) application().StreamRemoved(id);
+  application().StreamRemoved(id);
 
   // Note that removing the stream from the streams map likely releases
   // the last BaseObjectPtr holding onto the Stream instance, at which
@@ -3616,17 +3422,7 @@ void Session::RemoveStream(stream_id id) {
 void Session::ResumeStream(stream_id id) {
   DCHECK(!is_destroyed());
   SendPendingDataScope send_scope(this);
-  if (impl_->application_) {
-    application().ResumeStream(id);
-  } else {
-    ScheduleStream(id);
-  }
-}
-
-void Session::ScheduleStream(stream_id id) {
-  if (auto stream = FindStream(id)) [[likely]] {
-    stream->Schedule(&impl_->stream_queue_);
-  }
+  application().ResumeStream(id);
 }
 
 void Session::ShutdownStream(stream_id id, QuicError error) {
@@ -3642,9 +3438,9 @@ void Session::ShutdownStream(stream_id id, QuicError error) {
   if (error.type() == QuicError::Type::APPLICATION) {
     code = error.code();
   } else if (error.code() == NGTCP2_NO_ERROR) {
-    code = impl_->state()->no_error_code;
+    code = application().GetNoErrorCode();
   } else {
-    code = impl_->state()->internal_error_code;
+    code = application().GetInternalErrorCode();
   }
   ngtcp2_conn_shutdown_stream(*this, 0, id, code);
 }
@@ -3658,9 +3454,9 @@ void Session::ShutdownStreamWrite(stream_id id, QuicError error) {
   if (error.type() == QuicError::Type::APPLICATION) {
     code = error.code();
   } else if (error.code() == NGTCP2_NO_ERROR) {
-    code = impl_->state()->no_error_code;
+    code = application().GetNoErrorCode();
   } else {
-    code = impl_->state()->internal_error_code;
+    code = application().GetInternalErrorCode();
   }
   ngtcp2_conn_shutdown_stream_write(*this, 0, id, code);
 }
@@ -3668,27 +3464,16 @@ void Session::ShutdownStreamWrite(stream_id id, QuicError error) {
 void Session::StreamDataBlocked(stream_id id) {
   DCHECK(!is_destroyed());
   STAT_INCREMENT(Stats, block_count);
-  if (impl_->application_) {
-    return application().BlockStream(id);
-  }
-  if (auto stream = FindStream(id)) [[likely]] {
-    // Native path: remove the stream from the send queue. It will be
-    // re-scheduled via the extend-max-stream-data callback when the peer
-    // grants more flow control. Without this, SendPendingData would
-    // repeatedly pop and retry the same blocked stream in an infinite
-    // loop.
-    stream->Unschedule();
-    stream->EmitBlocked();
-  }
+  application().BlockStream(id);
 }
 
 void Session::CollectSessionTicketAppData(
     SessionTicket::AppData* app_data) const {
   DCHECK(!is_destroyed());
-  if (impl_->application_) {
-    return application().CollectSessionTicketAppData(app_data);
-  }
-  // Native path: sessions with no application have no app data to embed.
+  // Mirrors ExtractSessionTicketAppData: with no Application installed there
+  // is nothing to embed, and the ticket carries no application data.
+  if (!has_application()) return;
+  application().CollectSessionTicketAppData(app_data);
 }
 
 SessionTicket::AppData::Status Session::ExtractSessionTicketAppData(
@@ -3708,10 +3493,9 @@ SessionTicket::AppData::Status Session::ExtractSessionTicketAppData(
     // No app data in the ticket. Accept optimistically.
     return accept();
   }
-  // Native path (no application): native tickets embed no app data (the
-  // empty case is accepted above), so any app data present is
-  // application-typed and cannot be validated here. Reject it, falling
-  // back cleanly to a full 1-RTT handshake.
+  // No Application is installed, so nothing here can interpret
+  // application-typed ticket data (the empty case is accepted above).
+  // Reject it and fall back cleanly to a full 1-RTT handshake.
   Debug(this, "Session ticket app data is unusable without an application");
   return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
 }
@@ -3827,6 +3611,10 @@ void Session::FlushPendingQlog() {
   // Once we are firing events, the server session is active:
   active_ = true;
   if (is_destroyed()) return;
+  // Becoming active closes the dynamic-attachment window (the
+  // new-session callback that just returned was the server's chance to
+  // attach): install the DefaultApplication if no application was attached.
+  EnsureApplication();
   DCHECK(impl_->state()->wrapped);
   // Runs synchronously immediately after the new-session callback returns.
   auto pending = std::move(impl_->pending_qlog_);
@@ -4151,6 +3939,9 @@ bool Session::HandshakeCompleted() {
   DCHECK(!is_server() || hello_processed_);
   // For a client, once the handshake is completed, we're active. The server
   // is active earlier, as 0RTT etc can fire before handshake completion.
+  // Becoming active closes the dynamic-attachment window: install the
+  // DefaultApplication now if no application was attached.
+  if (!EnsureApplication()) return false;
   active_ = true;
 
   STAT_RECORD_TIMESTAMP(Stats, handshake_completed_at);

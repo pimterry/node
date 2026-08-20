@@ -32,8 +32,8 @@ const serverEndpoint = await listen(mustCall((serverSession) => {
   assert.ok(params.initialMaxStreamsBidi >= 0n);
 
   // ALPN negotiation has completed without installing an application
-  // (none requested, so this is a raw session).
-  assert.strictEqual(getQuicSessionState(serverSession).hasApplication, false);
+  // (none requested): the attachment window is still open (type 0).
+  assert.strictEqual(getQuicSessionState(serverSession).applicationType, 0);
 
   sessionSeen.resolve();
 }));

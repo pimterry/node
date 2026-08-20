@@ -119,8 +119,9 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
 
     // The name of the protocol application to install on the session
     // (see application.h). Set only by internal consumer layers (e.g.
-    // the HTTP/3 JS layer); empty means the session runs the native raw-stream
-    // path with no application installed.
+    // the HTTP/3 JS layer); empty means no application is preconfigured
+    // and the DefaultApplication is installed when the dynamic-attachment
+    // window closes.
     std::string application;
 
     // The application-specific settings supplied by the consumer layer
@@ -400,8 +401,9 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
 
   // Select the Application implementation: the factory registered under
   // options.application when set (see application.h), otherwise nullptr.
-  // With no application requested the session runs the native raw-stream
-  // path and no Application is ever installed.
+  // With no application requested the session leaves the application
+  // unset until the dynamic-attachment window closes, at which point
+  // EnsureApplication() installs the DefaultApplication.
   std::unique_ptr<Application> SelectApplication();
 
   // Install the Application on the session. Called at construction for
@@ -411,6 +413,13 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   void SetApplication(std::unique_ptr<Application> app);
 
   void InstallApplication();
+
+  // Closes the dynamic-attachment window: if no application has been
+  // installed yet, installs the DefaultApplication. Called wherever the
+  // window closes (a stream is created, or the session becomes active).
+  // Returns false only when an application was requested by name but
+  // failed to install (the handshake is failing in that case).
+  bool EnsureApplication();
 
   // ngtcp2 ignores the duplicate when the TLS stack reports these again.
   void SetEarlyRemoteTransportParams(std::span<const uint8_t> params);
@@ -496,22 +505,6 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   void ShutdownStream(stream_id id, QuicError error = QuicError());
   void ShutdownStreamWrite(stream_id id, QuicError code = QuicError());
 
-  // The application data-plane dispatchers. Each routes to the installed
-  // Application when one exists; otherwise the session's native
-  // raw-stream implementation runs (the session schedules streams on its
-  // own send queue and pulls their data directly).
-  int GetStreamData(StreamData* data);
-  bool StreamCommit(StreamData* data, size_t datalen);
-  bool AcknowledgeStreamData(stream_id id, size_t datalen);
-  bool ReceiveStreamOpen(stream_id id);
-  bool ReceiveStreamData(stream_id id,
-                         const uint8_t* data,
-                         size_t datalen,
-                         const Stream::ReceiveDataFlags& flags,
-                         void* stream_user_data);
-  // Native-path scheduling: puts the stream on the session's send queue.
-  void ScheduleStream(stream_id id);
-
   // True when the send pump may run: a session that requested a protocol
   // application must not send until that application has been installed;
   // a session with no application requested is always ready.
@@ -520,11 +513,6 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   // True when the installed application manages stream FIN itself (e.g.
   // HTTP/3 via nghttp3); false when no application is installed.
   bool stream_fin_managed_by_application() const;
-
-  // The application-level "internal error" wire code in effect for this
-  // session (the installed application's code, or the raw QUIC default
-  // when none is installed).
-  error_code internal_error_code() const;
 
   // Use the configured CID::Factory to generate a new CID.
   CID new_cid(size_t len = CID::kMaxLength) const;
@@ -753,6 +741,7 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   friend struct NgHttp3CallbackScope;
   friend class Application;
   friend class BindingData;
+  friend class DefaultApplication;
   friend class Http3Application;
   friend class Endpoint;
   friend class SessionManager;

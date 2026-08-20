@@ -482,6 +482,7 @@ class Stream final : public AsyncWrap,
   friend class PendingStream;
   friend class Http3Application;
   friend class Http3Binding;
+  friend class DefaultApplication;
   friend class Session;
 
  public:

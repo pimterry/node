@@ -400,7 +400,10 @@ crypto::ClientHelloResult TLSContext::OnClientHello(
 
   // Install the Application while the handshake is still stopped, so that
   // it is in place before a session ticket can be accepted and early data
-  // can start arriving.
+  // can start arriving. Sessions that request no application install
+  // nothing here; their dynamic-attachment window stays open through the
+  // new-session callback, after which EnsureApplication() falls back to
+  // the DefaultApplication.
   session.InstallApplication();
   session.set_hello_processed();
 

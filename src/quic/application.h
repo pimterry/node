@@ -21,6 +21,16 @@ class Session::Application : public MemoryRetainer {
   explicit Application(Session* session);
   DISALLOW_COPY_AND_MOVE(Application)
 
+  // The type of Application, exposed via the session state so JS
+  // can observe which Application was selected.
+  // This is used primarily for testing/debugging.
+  enum class Type : uint8_t {
+    NONE = 0,     // Not yet selected (dynamic-attachment window open)
+    DEFAULT = 1,  // DefaultApplication (no protocol application)
+    HTTP3 = 2,    // Http3Application (h3 ALPN)
+  };
+  virtual Type type() const = 0;
+
   virtual bool Start();
 
   // Returns true if Start() has been called successfully.
@@ -201,6 +211,10 @@ void RegisterApplicationFactory(std::string_view name,
                                 const ApplicationFactory& factory);
 // Returns the factory registered under name, or nullptr.
 const ApplicationFactory* FindApplicationFactory(std::string_view name);
+
+// Create a DefaultApplication for the given session.
+std::unique_ptr<Session::Application> CreateDefaultApplication(
+    Session* session);
 
 }  // namespace node::quic
 

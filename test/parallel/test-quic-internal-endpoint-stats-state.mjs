@@ -171,7 +171,7 @@ assert.strictEqual(sessionState.isStatelessReset, false);
 assert.strictEqual(sessionState.isHandshakeCompleted, false);
 assert.strictEqual(sessionState.isHandshakeConfirmed, false);
 assert.strictEqual(sessionState.isStreamOpenAllowed, false);
-assert.strictEqual(sessionState.hasApplication, false);
+assert.strictEqual(sessionState.applicationType, 0);
 assert.strictEqual(sessionState.isWrapped, false);
 assert.strictEqual(sessionState.isServer, false);
 assert.strictEqual(sessionState.maxDatagramSize, 0);

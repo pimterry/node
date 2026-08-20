@@ -63,7 +63,7 @@ const serverEndpoint = await listen(mustCall((serverSession) => {
     // settings are available as soon as the session is surfaced.
     checkSettings(serverSession.settings, 'server');
     assert.strictEqual(
-      getQuicSessionState(serverSession.session).hasApplication, true);
+      getQuicSessionState(serverSession.session).applicationType, 2);
     assert.strictEqual(getQuicSessionState(serverSession.session).isServer, true);
 
     stream.onheaders = mustCall(() => {
@@ -88,7 +88,7 @@ await clientSession.opened;
 // The client installs its application at session creation, so the
 // settings are available immediately after the session opens.
 checkSettings(clientSession.settings, 'client');
-assert.strictEqual(getQuicSessionState(clientSession.session).hasApplication, true);
+assert.strictEqual(getQuicSessionState(clientSession.session).applicationType, 2);
 assert.strictEqual(getQuicSessionState(clientSession.session).isServer, false);
 
 // Exchange a request to let the server side run its assertions.
