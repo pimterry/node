@@ -59,7 +59,7 @@ carry application data.
 | `session.h/cc`     | `Session` — QUIC connection state machine (\~4,700 lines)   |
 | `streams.h/cc`     | `Stream`, `Outbound`, `PendingStream` — data flow           |
 | `application.h/cc` | `Session::Application` base + name-keyed factory registry   |
-| `http3.h/cc`       | `Http3Application` — nghttp3 integration (\~1,950 lines)    |
+| `http3.h/cc`       | `Http3Application` + `Http3Binding` — nghttp3 integration   |
 
 ### Infrastructure
 
@@ -156,6 +156,9 @@ Two implementations currently ship in core:
 * **`Http3Application`** (`http3.cc`): Registered under the name `http3`.
   Wraps `nghttp3_conn` for HTTP/3 framing, header compression (QPACK), and
   stream prioritization. Manages unidirectional control streams internally.
+  Its JS-facing capability is **`Http3Binding`**: one weakly session-bound
+  handle per session, created as the native attach operation, exposing the
+  HTTP/3-only operations and receiving the session-level HTTP/3 events.
 
 Install timing has two paths. Using the `options.application` option configured
 up front, the Application is installed early, so it exists before any 0-RTT

@@ -73,6 +73,7 @@ const { getSystemErrorName } = require('util');
     delete providers.QUIC_PACKET;
     delete providers.QUIC_UDP;
     delete providers.QUIC_ENDPOINT;
+    delete providers.QUIC_HTTP3BINDING;
     delete providers.QUIC_SESSION;
     delete providers.QUIC_STREAM;
     delete providers.LOCKS;

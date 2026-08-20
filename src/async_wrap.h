@@ -64,6 +64,7 @@ namespace node {
   V(PROMISE)                                                                   \
   V(QUERYWRAP)                                                                 \
   V(QUIC_ENDPOINT)                                                             \
+  V(QUIC_HTTP3BINDING)                                                         \
   V(QUIC_LOGSTREAM)                                                            \
   V(QUIC_SESSION)                                                              \
   V(QUIC_STREAM)                                                               \

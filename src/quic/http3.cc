@@ -352,24 +352,47 @@ class Http3Application final : public Session::Application {
   }
 
   // ==========================================================================
-  // HTTP/3 events reported up to the session/JS layer. The server session is
-  // surfaced to JS while the handshake is still paused at the ClientHello, so
-  // a listener is always in place before any of these can fire.
+  // The JS-facing Http3Binding handle bound to this application. Set once
+  // when the handle is created (creating it is the native HTTP/3 attach
+  // operation); session-level HTTP/3 events (GOAWAY, ORIGIN, SETTINGS) are
+  // emitted on it rather than on the generic session handle. The reference
+  // is weak: if JS releases the handle, the events are dropped.
+
+  void set_binding(AsyncWrap* binding) {
+    CHECK(!has_binding_);
+    binding_ = BaseObjectWeakPtr<AsyncWrap>(binding);
+    has_binding_ = true;
+  }
+
+  bool has_binding() const { return has_binding_; }
+
+  // Whether JS has registered an onorigin listener; used to skip
+  // building the origins array when nobody is listening.
+  void set_origin_listener(bool on) { has_origin_listener_ = on; }
+
+  // ==========================================================================
+  // HTTP/3 events reported up to the JS layer via the Http3Binding. The
+  // server session is surfaced to JS while the handshake is still paused at
+  // the ClientHello, so the binding is in place before any of these can fire.
 
   void EmitGoaway(stream_id last_stream_id) {
     Session& s = session();
     if (s.is_destroyed() || !s.env()->can_call_into_js()) return;
+    BaseObjectPtr<AsyncWrap> binding(binding_.get());
+    if (!binding) return;
     CallbackScope<Session> cb_scope(&s);
     Local<Value> argv[] = {BigInt::New(s.env()->isolate(), last_stream_id)};
-    s.MakeCallback(BindingData::Get(s.env()).session_goaway_callback(),
-                   arraysize(argv),
-                   argv);
+    binding->MakeCallback(BindingData::Get(s.env()).session_goaway_callback(),
+                          arraysize(argv),
+                          argv);
   }
 
   void EmitOrigins(std::vector<std::string>&& origins) {
     Session& s = session();
     if (s.is_destroyed() || !s.env()->can_call_into_js()) return;
-    if (!s.has_origin_listener()) return;
+    if (!has_origin_listener_) return;
+    BaseObjectPtr<AsyncWrap> binding(binding_.get());
+    if (!binding) return;
     CallbackScope<Session> cb_scope(&s);
     auto* isolate = s.env()->isolate();
     LocalVector<Value> elements(isolate, origins.size());
@@ -383,16 +406,18 @@ class Http3Application final : public Session::Application {
     }
     Local<Value> argv[] = {
         Array::New(isolate, elements.data(), elements.size())};
-    s.MakeCallback(BindingData::Get(s.env()).session_origin_callback(),
-                   arraysize(argv),
-                   argv);
+    binding->MakeCallback(BindingData::Get(s.env()).session_origin_callback(),
+                          arraysize(argv),
+                          argv);
   }
 
   void EmitApplicationSettings() {
     Session& s = session();
     if (s.is_destroyed() || !s.env()->can_call_into_js()) return;
+    BaseObjectPtr<AsyncWrap> binding(binding_.get());
+    if (!binding) return;
     CallbackScope<Session> cb_scope(&s);
-    s.MakeCallback(
+    binding->MakeCallback(
         BindingData::Get(s.env()).session_application_callback(), 0, nullptr);
   }
 
@@ -522,14 +547,14 @@ class Http3Application final : public Session::Application {
     stream_id goaway_id = pending_goaway_id_;
     pending_goaway_id_ = -1;
 
-    bool is_notice =
+    bool is_shutdown_notice =
         static_cast<uint64_t>(goaway_id) >= NGHTTP3_SHUTDOWN_NOTICE_STREAM_ID;
 
     // For the shutdown notice, replace the sentinel stream ID with -1
     // so JS sees a clean marker instead of a huge implementation detail.
-    stream_id emit_id = is_notice ? -1 : goaway_id;
+    stream_id emit_id = is_shutdown_notice ? -1 : goaway_id;
 
-    if (!is_notice) {
+    if (!is_shutdown_notice) {
       // Final GOAWAY: destroy client-initiated bidi streams with IDs >
       // goaway_id. These were not processed by the peer and can be retried.
       // Copy the map because Destroy() modifies it.
@@ -739,7 +764,7 @@ class Http3Application final : public Session::Application {
                : SessionTicket::AppData::Status::TICKET_USE;
   }
 
-  MaybeLocal<Object> GetSettingsObject(Environment* env) override {
+  MaybeLocal<Object> GetSettingsObject(Environment* env) {
     return options_.ToObject(env);
   }
 
@@ -1316,6 +1341,14 @@ class Http3Application final : public Session::Application {
   nghttp3_mem* allocator_;
   Http3Settings options_;
   Http3ConnectionPointer conn_;
+
+  // The JS-facing Http3Binding handle, if one has been created. Weak so
+  // that the binding's JS lifetime is not extended by the application;
+  // has_binding_ stays set even if the handle is collected, enforcing
+  // that only one handle is ever created per session.
+  BaseObjectWeakPtr<AsyncWrap> binding_;
+  bool has_binding_ = false;
+  bool has_origin_listener_ = false;
   stream_id control_stream_id_ = -1;
   stream_id qpack_dec_stream_id_ = -1;
   stream_id qpack_enc_stream_id_ = -1;
@@ -1748,15 +1781,19 @@ class Http3Application final : public Session::Application {
       on_stream_close};
 };
 
-// The per-session JS-facing handle for HTTP/3 stream operations
-// (kHttp3Handle). One per session, with a weak reference to the Session,
-// operating on the Application reached from the passed stream handle.
-class Http3Binding final : public BaseObject {
+// The per-session JS-facing HTTP/3 handle (kHttp3Handle): the native
+// capability through which JS reaches the HTTP/3-only operations
+// (headers, trailers, priority, settings) and receives the session-level
+// HTTP/3 events (GOAWAY, ORIGIN, SETTINGS). Exactly one exists per
+// session and creating it is the native HTTP/3 attach operation (see
+// CreateHttp3Handle). It holds a weak reference to its Session and only
+// operates on that session's streams.
+class Http3Binding final : public AsyncWrap {
  public:
   static BaseObjectPtr<Http3Binding> Create(Session* session);
 
-  Http3Binding(Environment* env, Local<Object> object)
-      : BaseObject(env, object) {
+  Http3Binding(Environment* env, Local<Object> object, Session* session)
+      : AsyncWrap(env, object, PROVIDER_QUIC_HTTP3BINDING), session_(session) {
     MakeWeak();
   }
 
@@ -1767,16 +1804,31 @@ class Http3Binding final : public BaseObject {
   JS_METHOD(SendTrailers);
   JS_METHOD(SetPriority);
   JS_METHOD(GetPriority);
+  JS_METHOD(GetSettings);
+  JS_METHOD(SetOriginListener);
 
   static void RegisterExternalReferences(ExternalReferenceRegistry* registry);
 
-  SET_NO_MEMORY_INFO()
+  void MemoryInfo(MemoryTracker* tracker) const override {
+    tracker->TrackField("session", session_);
+  }
   SET_MEMORY_INFO_NAME(Http3Binding)
   SET_SELF_SIZE(Http3Binding)
+
+ private:
+  // The bound session, or nullptr once it has been destroyed.
+  Session* session() const {
+    Session* session = session_.get();
+    if (session == nullptr || session->is_destroyed()) return nullptr;
+    return session;
+  }
+
+  BaseObjectWeakPtr<Session> session_;
 };
 
 JS_CONSTRUCTOR_IMPL(Http3Binding, http3binding_constructor_template, {
   JS_ILLEGAL_CONSTRUCTOR();
+  JS_INHERIT(AsyncWrap);
   JS_CLASS(http3binding);
   SetProtoMethod(env->isolate(), tmpl, "sendHeaders", SendHeaders);
   SetProtoMethod(env->isolate(),
@@ -1786,11 +1838,15 @@ JS_CONSTRUCTOR_IMPL(Http3Binding, http3binding_constructor_template, {
   SetProtoMethod(env->isolate(), tmpl, "sendTrailers", SendTrailers);
   SetProtoMethod(env->isolate(), tmpl, "setPriority", SetPriority);
   SetProtoMethodNoSideEffect(env->isolate(), tmpl, "getPriority", GetPriority);
+  SetProtoMethodNoSideEffect(env->isolate(), tmpl, "settings", GetSettings);
+  SetProtoMethod(env->isolate(), tmpl, "setOriginListener", SetOriginListener);
 })
 
 BaseObjectPtr<Http3Binding> Http3Binding::Create(Session* session) {
+  DCHECK(session->has_application() &&
+         session->application().type() == Session::Application::Type::HTTP3);
   JS_NEW_INSTANCE_OR_RETURN(session->env(), obj, BaseObjectPtr<Http3Binding>());
-  return MakeBaseObject<Http3Binding>(session->env(), obj);
+  return MakeBaseObject<Http3Binding>(session->env(), obj, session);
 }
 
 void Http3Binding::RegisterExternalReferences(
@@ -1800,6 +1856,8 @@ void Http3Binding::RegisterExternalReferences(
   registry->Register(SendTrailers);
   registry->Register(SetPriority);
   registry->Register(GetPriority);
+  registry->Register(GetSettings);
+  registry->Register(SetOriginListener);
 }
 
 // The binding is only ever attached to an HTTP/3 session, so the session's
@@ -1808,17 +1866,33 @@ inline Http3Application& Http3App(Session& session) {
   return static_cast<Http3Application&>(session.application());
 }
 
+// Unwraps the stream argument of a binding stream operation and checks
+// that it belongs to the binding's (still live) session. Returns nullptr
+// when the operation cannot proceed; a stream from any other session is
+// rejected with an error.
+Stream* GetOwnStream(Http3Binding* binding,
+                     Session* session,
+                     Local<Value> value) {
+  Stream* stream = BaseObject::Unwrap<Stream>(value);
+  if (stream == nullptr || session == nullptr) return nullptr;
+  if (&stream->session() != session) {
+    THROW_ERR_INVALID_STATE(
+        binding->env(), "The stream does not belong to this HTTP/3 session");
+    return nullptr;
+  }
+  return stream;
+}
+
 JS_METHOD_IMPL(Http3Binding::SendHeaders) {
   Http3Binding* binding;
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
   CHECK(args[1]->IsArray());   // headers
   CHECK(args[2]->IsUint32());  // flags
 
-  Stream* stream = BaseObject::Unwrap<Stream>(args[0]);
+  Session* session_ptr = binding->session();
+  Stream* stream = GetOwnStream(binding, session_ptr, args[0]);
   if (stream == nullptr) return args.GetReturnValue().Set(false);
-
-  Session& session = stream->session();
-  if (!session.has_application()) return args.GetReturnValue().Set(false);
+  Session& session = *session_ptr;
 
   Local<Array> headers = args[1].As<Array>();
   auto flags = static_cast<HeadersFlags>(args[2].As<Uint32>()->Value());
@@ -1851,26 +1925,24 @@ JS_METHOD_IMPL(Http3Binding::SendInformationalHeaders) {
   Http3Binding* binding;
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
   CHECK(args[1]->IsArray());  // headers
-  Stream* stream = BaseObject::Unwrap<Stream>(args[0]);
+  Session* session_ptr = binding->session();
+  Stream* stream = GetOwnStream(binding, session_ptr, args[0]);
   if (stream == nullptr || stream->is_pending())
     return args.GetReturnValue().Set(false);
-  Session& session = stream->session();
-  if (!session.has_application()) return args.GetReturnValue().Set(false);
   args.GetReturnValue().Set(
-      Http3App(session).SubmitInfo(*stream, args[1].As<Array>()));
+      Http3App(*session_ptr).SubmitInfo(*stream, args[1].As<Array>()));
 }
 
 JS_METHOD_IMPL(Http3Binding::SendTrailers) {
   Http3Binding* binding;
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
   CHECK(args[1]->IsArray());  // headers
-  Stream* stream = BaseObject::Unwrap<Stream>(args[0]);
+  Session* session_ptr = binding->session();
+  Stream* stream = GetOwnStream(binding, session_ptr, args[0]);
   if (stream == nullptr || stream->is_pending())
     return args.GetReturnValue().Set(false);
-  Session& session = stream->session();
-  if (!session.has_application()) return args.GetReturnValue().Set(false);
   args.GetReturnValue().Set(
-      Http3App(session).SubmitTrailers(*stream, args[1].As<Array>()));
+      Http3App(*session_ptr).SubmitTrailers(*stream, args[1].As<Array>()));
 }
 
 JS_METHOD_IMPL(Http3Binding::SetPriority) {
@@ -1878,10 +1950,10 @@ JS_METHOD_IMPL(Http3Binding::SetPriority) {
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
   CHECK(args[1]->IsUint32());  // packed: (urgency << 1) | incremental
 
-  Stream* stream = BaseObject::Unwrap<Stream>(args[0]);
+  Session* session_ptr = binding->session();
+  Stream* stream = GetOwnStream(binding, session_ptr, args[0]);
   if (stream == nullptr) return;
-  Session& session = stream->session();
-  if (!session.has_application()) return;
+  Session& session = *session_ptr;
 
   uint32_t packed = args[1].As<Uint32>()->Value();
   auto priority = static_cast<StreamPriority>(packed >> 1);
@@ -1905,22 +1977,38 @@ JS_METHOD_IMPL(Http3Binding::SetPriority) {
 JS_METHOD_IMPL(Http3Binding::GetPriority) {
   Http3Binding* binding;
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
-  Stream* stream = BaseObject::Unwrap<Stream>(args[0]);
-  if (stream == nullptr) return;
-  Session& session = stream->session();
-  if (!session.has_application() || stream->is_pending()) return;
+  Session* session_ptr = binding->session();
+  Stream* stream = GetOwnStream(binding, session_ptr, args[0]);
+  if (stream == nullptr || stream->is_pending()) return;
 
-  auto result = Http3App(session).GetStreamPriority(*stream);
+  auto result = Http3App(*session_ptr).GetStreamPriority(*stream);
   uint32_t packed = (static_cast<uint32_t>(result.priority) << 1) |
                     (result.flags == StreamPriorityFlags::INCREMENTAL ? 1 : 0);
   args.GetReturnValue().Set(packed);
 }
 
-namespace {
-std::unique_ptr<Session::Application> CreateHttp3Application(Session* session);
-}  // namespace
+JS_METHOD_IMPL(Http3Binding::GetSettings) {
+  Http3Binding* binding;
+  ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
+  Session* session = binding->session();
+  if (session == nullptr) return;
+
+  Local<Object> obj;
+  if (Http3App(*session).GetSettingsObject(binding->env()).ToLocal(&obj)) {
+    args.GetReturnValue().Set(obj);
+  }
+}
+
+JS_METHOD_IMPL(Http3Binding::SetOriginListener) {
+  Http3Binding* binding;
+  ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
+  Session* session = binding->session();
+  if (session == nullptr) return;
+  Http3App(*session).set_origin_listener(args[0]->IsTrue());
+}
 
 void CreateHttp3Handle(const FunctionCallbackInfo<Value>& args) {
+  Environment* env = Environment::GetCurrent(args);
   Session* session;
   ASSIGN_OR_RETURN_UNWRAP(&session, args[0]);
 
@@ -1939,25 +2027,45 @@ void CreateHttp3Handle(const FunctionCallbackInfo<Value>& args) {
     if (session->has_application() || session->is_active() ||
         session->has_streams()) {
       THROW_ERR_INVALID_STATE(
-          session->env(),
+          env,
           "An application can only be attached to a QUIC session before it "
           "becomes active (begins emitting events) and before any streams "
           "are created");
       return;
     }
-    session->SetApplication(CreateHttp3Application(session));
+    Http3Settings settings;
+    if (!args[1]->IsUndefined()) {
+      if (!Http3Settings::From(env, args[1]).To(&settings)) return;
+    }
+    session->SetApplication(
+        std::make_unique<Http3Application>(session, settings));
 
     if (session->is_server() && !session->application().Start()) {
       // Start() failed (e.g. the peer's initial_max_streams_uni is < 3), so
       // the application cannot run HTTP/3.
-      THROW_ERR_INVALID_STATE(session->env(),
+      THROW_ERR_INVALID_STATE(env,
                               "The HTTP/3 application could not be started");
       return;
     }
+  } else if (!args[1]->IsUndefined()) {
+    // The application (and its settings) were configured when the session
+    // was created; new settings cannot be applied now.
+    THROW_ERR_INVALID_STATE(
+        env, "The QUIC session already has its HTTP/3 settings configured");
+    return;
   }
 
+  Http3Application& app = Http3App(*session);
+  if (app.has_binding()) {
+    THROW_ERR_INVALID_STATE(
+        env, "The QUIC session already has an application attached");
+    return;
+  }
   BaseObjectPtr<Http3Binding> handle = Http3Binding::Create(session);
-  if (handle) args.GetReturnValue().Set(handle->object());
+  if (handle) {
+    app.set_binding(handle.get());
+    args.GetReturnValue().Set(handle->object());
+  }
 }
 
 void RegisterHttp3ExternalReferences(ExternalReferenceRegistry* registry) {

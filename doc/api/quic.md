@@ -2451,14 +2451,18 @@ one through the [`listenHttp3()`][] callback; clients create one with [`connectH
 Alternatively, you can call the constructor directly on a QuicSession if it's not
 already active.
 
-### `new Http3Session(session[, callbacks])`
+### `new Http3Session(session[, options])`
 
 <!-- YAML
 added: REPLACEME
 -->
 
 * `session` {quic.QuicSession} The raw transport session to wrap.
-* `callbacks` {Object}
+* `options` {Object}
+  * `settings` {Object} The HTTP/3 settings to apply, as for
+    [`connectHttp3()`][]. Only accepted when the wrapped session does not
+    already have HTTP/3 configured (it was created by plain `connect()` or
+    `listen()`); otherwise `ERR_INVALID_STATE` is thrown.
   * `ongoaway` {quic.OnGoawayCallback} The initial `ongoaway` callback.
   * `onorigin` {quic.OnOriginCallback} The initial `onorigin` callback.
   * `onsettings` {quic.OnSettingsCallback} The initial `onsettings` callback.

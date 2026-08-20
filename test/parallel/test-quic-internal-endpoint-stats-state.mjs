@@ -163,7 +163,6 @@ assert.strictEqual(sessionState.hasDatagramListener, false);
 assert.strictEqual(sessionState.hasDatagramStatusListener, false);
 assert.strictEqual(sessionState.hasSessionTicketListener, false);
 assert.strictEqual(sessionState.hasNewTokenListener, false);
-assert.strictEqual(sessionState.hasOriginListener, false);
 assert.strictEqual(sessionState.isClosing, false);
 assert.strictEqual(sessionState.isGracefulClose, false);
 assert.strictEqual(sessionState.isSilentClose, false);

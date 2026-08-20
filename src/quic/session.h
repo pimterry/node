@@ -615,8 +615,6 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
 
   void FlushPendingQlog();
 
-  bool has_origin_listener() const;
-
   enum class CloseMethod : uint8_t {
     // Immediate close with a roundtrip through JavaScript, causing all
     // currently opened streams to be closed. An attempt will be made to

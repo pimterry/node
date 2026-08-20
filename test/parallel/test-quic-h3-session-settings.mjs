@@ -108,3 +108,47 @@ await clientSession.close();
 assert.strictEqual(clientSession.settings, null);
 
 await serverEndpoint.close();
+
+// Dynamic attach: wrapping a raw QUIC session with
+// new Http3Session(session, { settings }) applies the settings at
+// attach time, and they read back the same way.
+{
+  const { listen: quicListen, connect: quicConnect } =
+    await import('node:quic');
+  const { Http3Session } = await import('node:quic');
+
+  const serverChecked = Promise.withResolvers();
+  const endpoint = await quicListen(mustCall((quicSession) => {
+    const session = new Http3Session(quicSession, {
+      settings: customSettings,
+    });
+    checkSettings(session.settings, 'dynamic server');
+    session.onstream = mustCall(async (stream) => {
+      stream.onheaders = mustCall(() => {
+        stream.sendHeaders({ ':status': '200' }, { terminal: true });
+      });
+      await stream.closed;
+      session.close();
+      serverChecked.resolve();
+    });
+  }), { sni: { '*': { keys: [key], certs: [cert] } }, alpn: 'h3' });
+
+  const client = new Http3Session(
+    await quicConnect(endpoint.address, {
+      servername: 'localhost',
+      verifyPeer: 'manual',
+      alpn: 'h3',
+    }),
+    { settings: customSettings });
+  checkSettings(client.settings, 'dynamic client');
+
+  const stream = await client.request({
+    ':method': 'GET', ':path': '/', ':scheme': 'https',
+    ':authority': 'localhost',
+  });
+  // eslint-disable-next-line no-unused-vars
+  for await (const _ of stream) { /* drain */ }
+  await Promise.all([stream.closed, serverChecked.promise]);
+  await client.close();
+  await endpoint.close();
+}

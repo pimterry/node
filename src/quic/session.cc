@@ -70,8 +70,7 @@ enum class SessionListenerFlags : uint32_t {
   DATAGRAM = 1 << 1,
   DATAGRAM_STATUS = 1 << 2,
   SESSION_TICKET = 1 << 3,
-  NEW_TOKEN = 1 << 4,
-  ORIGIN = 1 << 5
+  NEW_TOKEN = 1 << 4
 };
 
 inline SessionListenerFlags operator|(SessionListenerFlags a,
@@ -194,8 +193,7 @@ uint64_t MaxDatagramPayload(uint64_t max_frame_size) {
   V(OpenStream, openStream, SIDE_EFFECT)                                       \
   V(SendDatagram, sendDatagram, SIDE_EFFECT)                                   \
   V(LocalTransportParams, localTransportParams, NO_SIDE_EFFECT)                \
-  V(RemoteTransportParams, remoteTransportParams, NO_SIDE_EFFECT)              \
-  V(ApplicationSettings, applicationSettings, NO_SIDE_EFFECT)
+  V(RemoteTransportParams, remoteTransportParams, NO_SIDE_EFFECT)
 
 struct Session::State final {
 #define V(_, name, type) type name;
@@ -1241,22 +1239,6 @@ struct Session::Impl final : public MemoryRetainer {
     }
   }
 
-  JS_METHOD(ApplicationSettings) {
-    auto env = Environment::GetCurrent(args);
-    Session* session;
-    ASSIGN_OR_RETURN_UNWRAP(&session, args.This());
-
-    Local<Object> obj;
-    if (!session->has_application()) {
-      // No application is installed (none was requested, the server has
-      // not completed ALPN negotiation yet, or the session has been
-      // destroyed). In all of these cases there are no settings.
-      return args.GetReturnValue().SetUndefined();
-    }
-    if (session->application().GetSettingsObject(env).ToLocal(&obj)) {
-      args.GetReturnValue().Set(obj);
-    }
-  }
   // Internal ngtcp2 callbacks
 
   static int on_acknowledge_stream_data_offset(ngtcp2_conn* conn,
@@ -3622,11 +3604,6 @@ void Session::FlushPendingQlog() {
     if (is_destroyed()) return;
     EmitQlog(flags, data);
   }
-}
-
-bool Session::has_origin_listener() const {
-  return HasListenerFlag(impl_->state()->listener_flags,
-                         SessionListenerFlags::ORIGIN);
 }
 
 void Session::ExtendStreamOffset(stream_id id, size_t amount) {

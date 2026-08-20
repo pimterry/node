@@ -129,14 +129,6 @@ class Session::Application : public MemoryRetainer {
       const SessionTicket::AppData& app_data,
       SessionTicket::AppData::Source::Flag flag);
 
-  // Returns a JS object describing the application's effective protocol
-  // settings (some values may have been updated by negotiation with the
-  // peer), or an empty result when the application exposes no settings.
-  // The shape is application-defined; the QUIC core never interprets it.
-  virtual v8::MaybeLocal<v8::Object> GetSettingsObject(Environment* env) {
-    return {};
-  }
-
   // Notifies the Application that the identified stream has been closed.
   virtual void ReceiveStreamClose(Stream* stream,
                                   QuicError&& error = QuicError());
