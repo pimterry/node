@@ -190,8 +190,7 @@ const decoder = new TextDecoder();
   });
   await clientSession.opened;
 
-  // Connection-specific headers are forbidden in HTTP/3. The request
-  // rejects during validation, before any stream is opened.
+  // Connection-specific headers are forbidden in HTTP/3.
   await assert.rejects(clientSession.request({
     ':method': 'GET',
     ':path': '/',
@@ -200,7 +199,6 @@ const decoder = new TextDecoder();
     'connection': 'keep-alive',
   }), { code: 'ERR_HTTP2_INVALID_CONNECTION_HEADERS' });
 
-  // Unknown pseudo-headers are forbidden.
   await assert.rejects(clientSession.request({
     ':bogus': 'nope',
     ':method': 'GET',

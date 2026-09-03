@@ -38,8 +38,6 @@ const decoder = new TextDecoder();
       assert.strictEqual(typeof pri.level, 'string');
       assert.strictEqual(typeof pri.incremental, 'boolean');
 
-      // Attach onheaders synchronously in the onstream frame, before
-      // any await.
       stream.onheaders = mustCall((headers) => {
         stream.setPriority({ level: 'high', incremental: true });
         assert.deepStrictEqual(stream.priority, { level: 'high', incremental: true });
@@ -165,8 +163,7 @@ const decoder = new TextDecoder();
 
   const serverEndpoint = await listen(mustCall(async (ss) => {
     ss.onstream = mustCall(async (stream) => {
-      // Attach onheaders synchronously in the onstream frame, before
-      // any await.
+      // onheaders must be attached synchronously, before any await.
       stream.onheaders = mustCall(() => {
         stream.sendHeaders({ ':status': '200' });
         stream.writer.writeSync(encoder.encode('ok'));
@@ -203,7 +200,7 @@ const decoder = new TextDecoder();
   // Create stream with default priority and a body. The body serves
   // as a signal — by the time it arrives at the server, the
   // PRIORITY_UPDATE (sent on the control stream) will have been
-  // processed. setPriority is called BEFORE request()
+  // processed. setPriority is called after request()
   // so the PRIORITY_UPDATE is queued before the stream data.
   //
   // Note: setPriority must be called after request()

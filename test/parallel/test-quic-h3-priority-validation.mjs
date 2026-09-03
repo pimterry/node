@@ -48,7 +48,6 @@ const headers = {
   ':authority': 'localhost',
 };
 
-// Validation of request() priority/incremental options.
 await assert.rejects(
   clientSession.request({ ...headers }, { priority: 'urgent' }),
   { code: 'ERR_INVALID_ARG_VALUE' },
@@ -76,7 +75,6 @@ assert.strictEqual(stream.id, 0n);
 assert.deepStrictEqual(stream.priority,
                        { level: 'high', incremental: true });
 
-// setPriority() arguments are validated too.
 assert.throws(
   () => stream.setPriority({ level: 'urgent' }),
   { code: 'ERR_INVALID_ARG_VALUE' },

@@ -4,7 +4,7 @@
 // Client sends request pseudo-headers plus a body, server reads the body
 // and echoes it back in the response.
 // Verifies:
-// - Client can send request headers + body via createBidirectionalStream
+// - Client can send request headers + body via request()
 // - Server receives the request body via async iteration
 // - Server response with echoed body is delivered to the client
 // - The terminal flag is correctly NOT set when body is provided

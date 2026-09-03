@@ -117,17 +117,12 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
     // so that it cannot be garbage collected.
     BaseObjectPtr<BaseObject> cid_factory_ref;
 
-    // The name of the protocol application to install on the session
-    // (see application.h). Set only by internal consumer layers (e.g.
-    // the HTTP/3 JS layer); empty means no application is preconfigured
-    // and the DefaultApplication is installed when the dynamic-attachment
-    // window closes.
+    // The name of the protocol application to install (see application.h).
+    // Set only by internal consumer layers; empty means none is requested.
     std::string application;
 
-    // The application-specific settings supplied by the consumer layer
-    // alongside the application name, pre-parsed by the registered
-    // application factory's parse hook at option-processing time.
-    // Opaque to the QUIC core; only the application's own hooks read it.
+    // Settings for that application, pre-parsed at option-processing time.
+    // Opaque to the QUIC core; only the application's own hooks read them.
     std::shared_ptr<void> application_settings;
 
     // When true, QLog output will be enabled for the session.
@@ -399,11 +394,8 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   // (ngtcp2_conn_read_pkt or ngtcp2_conn_continue_handshake).
   bool AfterNgtcp2Read(int err);
 
-  // Select the Application implementation: the factory registered under
-  // options.application when set (see application.h), otherwise nullptr.
-  // With no application requested the session leaves the application
-  // unset until the dynamic-attachment window closes, at which point
-  // EnsureApplication() installs the DefaultApplication.
+  // Creates the Application named by options.application, or nullptr when
+  // no application is requested.
   std::unique_ptr<Application> SelectApplication();
 
   // Install the Application on the session. Called at construction for
@@ -414,11 +406,8 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
 
   void InstallApplication();
 
-  // Closes the dynamic-attachment window: if no application has been
-  // installed yet, installs the DefaultApplication. Called wherever the
-  // window closes (a stream is created, or the session becomes active).
-  // Returns false only when an application was requested by name but
-  // failed to install (the handshake is failing in that case).
+  // Closes the dynamic-attachment window, installing the DefaultApplication
+  // if none is installed. False if a requested application failed to install.
   bool EnsureApplication();
 
   // ngtcp2 ignores the duplicate when the TLS stack reports these again.
@@ -505,13 +494,12 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   void ShutdownStream(stream_id id, QuicError error = QuicError());
   void ShutdownStreamWrite(stream_id id, QuicError code = QuicError());
 
-  // True when the send pump may run: a session that requested a protocol
-  // application must not send until that application has been installed;
-  // a session with no application requested is always ready.
+  // The send pump must not run before a requested application is installed:
+  // the application owns stream scheduling from its first flight.
   bool can_send_pending_data() const;
 
-  // True when the installed application manages stream FIN itself (e.g.
-  // HTTP/3 via nghttp3); false when no application is installed.
+  // True when the installed application manages stream FIN itself (HTTP/3);
+  // false when no application is installed.
   bool stream_fin_managed_by_application() const;
 
   // Use the configured CID::Factory to generate a new CID.

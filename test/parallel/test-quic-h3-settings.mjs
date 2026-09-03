@@ -137,10 +137,8 @@ const decoder = new TextDecoder();
   await serverEndpoint.close();
 }
 
-// enableConnectProtocol setting plus transport-level datagrams.
-// Verify these options are accepted and H3 sessions work with them.
-// (Datagram support is a QUIC transport parameter; HTTP/3 datagrams are
-// not yet supported, so SETTINGS_H3_DATAGRAM is never advertised.)
+// enableConnectProtocol setting.
+// Verify this option is accepted and H3 sessions work with it.
 {
   const serverDone = Promise.withResolvers();
 

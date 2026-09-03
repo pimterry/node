@@ -28,8 +28,7 @@ const session = await connect(endpoint.address, {
   verifyPeer: 'manual',
 });
 
-// A unidirectional stream is not an HTTP/3 request stream, so it is opened
-// directly on the underlying QUIC session rather than through request().
+// Not a request stream, so it must be opened on the underlying QUIC session.
 const stream = await session.session.createUnidirectionalStream();
 stream.writer.writeSync('x');
 

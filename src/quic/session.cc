@@ -645,10 +645,7 @@ Maybe<Session::Options> Session::Options::From(Environment* env,
     }
   }
 
-  // When an application is requested, parse its settings (supplied by
-  // the application's consumer layer alongside the name). The result is
-  // carried opaquely on the options; the QUIC core never interprets it.
-  // The application option is internal-only and HTTP/3 is the only
+  // The application option is internal-only, and HTTP/3 is the only
   // protocol application.
   if (!options.application.empty()) {
     CHECK_EQ(options.application, "http3");
@@ -1429,9 +1426,6 @@ struct Session::Impl final : public MemoryRetainer {
 
     if (level != NGTCP2_ENCRYPTION_LEVEL_1RTT) return NGTCP2_SUCCESS;
 
-    // With no application installed yet (the dynamic-attachment window
-    // is still open, e.g. a client that has not created any streams)
-    // there is nothing to start.
     if (!session->impl_->application_) return NGTCP2_SUCCESS;
 
     // If the application was already started via on_receive_tx_key
@@ -1492,9 +1486,7 @@ struct Session::Impl final : public MemoryRetainer {
     // handles for them. So, what we do here is pass the stream data on to the
     // application for processing. If it ends up being a user stream, the
     // application will handle creating the Stream handle and passing that off
-    // to the JavaScript side. An incoming stream also closes the
-    // dynamic-attachment window, installing the DefaultApplication first if
-    // no application has been attached.
+    // to the JavaScript side.
     if (!session->EnsureApplication() ||
         !session->application().ReceiveStreamData(
             stream_id, data, datalen, data_flags, stream_user_data)) {
@@ -1520,11 +1512,8 @@ struct Session::Impl final : public MemoryRetainer {
       if (level != NGTCP2_ENCRYPTION_LEVEL_0RTT) return NGTCP2_SUCCESS;
     }
 
-    // With no application installed there are two cases. If none was
-    // requested, the dynamic-attachment window is simply still open and
-    // there is nothing to start. If one was requested but is absent
-    // here, installation failed (e.g. ALPN mismatch, or the session
-    // ticket data was rejected) and the handshake must fail.
+    // A requested application should already be installed; if it is absent
+    // installation failed and so must the handshake.
     if (!session->impl_->application_) {
       return session->config().options.application.empty()
                  ? NGTCP2_SUCCESS
@@ -1587,8 +1576,6 @@ struct Session::Impl final : public MemoryRetainer {
 
   static int on_stream_open(ngtcp2_conn* conn, stream_id id, void* user_data) {
     NGTCP2_CALLBACK_SCOPE(session)
-    // An incoming stream closes the dynamic-attachment window, installing
-    // the DefaultApplication first if no application has been attached.
     if (!session->EnsureApplication() ||
         !session->application().ReceiveStreamOpen(id)) {
       return NGTCP2_ERR_CALLBACK_FAILURE;
@@ -2020,9 +2007,6 @@ void Session::SendPendingData() {
     }
 
     // The stream_data is the next block of data from the application stream.
-    // During the dynamic-attachment window there is no application and no
-    // streams, so there is never stream data; handshake and ACK frames can
-    // still be serialized below.
     if (impl_->application_ && application().GetStreamData(&stream_data) < 0) {
       Debug(this, "Application failed to get stream data");
       SetLastError(QuicError::ForNgtcp2Error(NGTCP2_ERR_INTERNAL));
@@ -2268,11 +2252,8 @@ Session::Session(Endpoint* endpoint,
   DCHECK(impl_);
   STAT_RECORD_TIMESTAMP(Stats, created_at);
 
-  // The default error codes. With no application installed yet, "no
-  // error" is 0x0 and the non-specific failure code is the QUIC
-  // transport-level INTERNAL_ERROR (0x1) used by ngtcp2 for unspecified
-  // failures. An installed application overrides these in
-  // SetApplication().
+  // Transport-level defaults, overridden by any application installed
+  // later in SetApplication().
   impl_->state()->no_error_code = NGTCP2_NO_ERROR;
   impl_->state()->internal_error_code = NGTCP2_INTERNAL_ERROR;
 
@@ -2450,10 +2431,8 @@ void Session::Close(CloseMethod method) {
       }
       impl_->state()->graceful_close = 1;
 
-      // A session that requested an application but has not installed it
-      // yet (a server before the TLS handshake completes ALPN) cannot do
-      // an application-level graceful shutdown (GOAWAY, CONNECTION_CLOSE
-      // etc.), so fall through to a silent close.
+      // A session that requested an application but has not installed it yet
+      // cannot signal an application-level shutdown, so it closes silently.
       if (!impl_->application_ && !config().options.application.empty()) {
         impl_->state()->silent_close = 1;
         return FinishClose();
@@ -2466,8 +2445,7 @@ void Session::Close(CloseMethod method) {
 
       // Signal application-level graceful shutdown (e.g., HTTP/3 GOAWAY).
       // BeginShutdown can trigger callbacks that re-enter JS and destroy
-      // this session, so check is_destroyed() after it returns. With no
-      // application installed there is no shutdown signaling to do.
+      // this session, so check is_destroyed() after it returns.
       if (impl_->application_) {
         application().BeginShutdown();
         if (is_destroyed()) return;
@@ -2629,11 +2607,6 @@ Session::Application& Session::application() const {
 }
 
 bool Session::can_send_pending_data() const {
-  // A session that requested an application must not run the send pump
-  // before the application is installed: the application owns stream
-  // scheduling from its first flight. With no application requested the
-  // pump is always ready (during the dynamic-attachment window it only
-  // serializes handshake and ACK frames).
   return impl_->application_ != nullptr || config().options.application.empty();
 }
 
@@ -2654,9 +2627,6 @@ void Session::InstallApplication() {
   // Acting on the ClientHello twice would install a second Application over
   // a live one; TLSSession::EarlySelection is what prevents that.
   CHECK(!has_application());
-  // Sessions that request no application install nothing here: their
-  // dynamic-attachment window stays open until EnsureApplication() closes
-  // it with the DefaultApplication.
   if (auto app = SelectApplication()) SetApplication(std::move(app));
 }
 
@@ -2671,8 +2641,6 @@ bool Session::EnsureApplication() {
   if (impl_->application_) [[likely]] {
     return true;
   }
-  // An application requested by name should already have installed; if it
-  // is absent here it failed to do so and the handshake is failing.
   if (!config().options.application.empty()) {
     return false;
   }
@@ -3241,8 +3209,6 @@ MaybeLocal<Object> Session::OpenStream(Direction direction,
   if (!can_create_streams()) [[unlikely]]
     return {};
 
-  // Creating a stream (even a pending one) closes the dynamic-attachment
-  // window.
   if (!EnsureApplication()) [[unlikely]]
     return {};
 
@@ -3450,8 +3416,8 @@ void Session::StreamDataBlocked(stream_id id) {
 void Session::CollectSessionTicketAppData(
     SessionTicket::AppData* app_data) const {
   DCHECK(!is_destroyed());
-  // Mirrors ExtractSessionTicketAppData: with no Application installed there
-  // is nothing to embed, and the ticket carries no application data.
+  // With no Application there is nothing to embed; the empty ticket that
+  // leaves is exactly what ExtractSessionTicketAppData accepts.
   if (!has_application()) return;
   application().CollectSessionTicketAppData(app_data);
 }
@@ -3473,9 +3439,8 @@ SessionTicket::AppData::Status Session::ExtractSessionTicketAppData(
     // No app data in the ticket. Accept optimistically.
     return accept();
   }
-  // No Application is installed, so nothing here can interpret
-  // application-typed ticket data (the empty case is accepted above).
-  // Reject it and fall back cleanly to a full 1-RTT handshake.
+  // Nothing can interpret application data with no Application installed,
+  // so reject and fall back cleanly to a full 1-RTT handshake.
   Debug(this, "Session ticket app data is unusable without an application");
   return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
 }
@@ -3588,12 +3553,10 @@ bool Session::tls_info_ready() const {
 }
 
 void Session::FlushPendingQlog() {
-  // Once we are firing events, the server session is active:
+  // The new-session callback has returned, so the server session is now
+  // active and its window to attach an application has closed.
   active_ = true;
   if (is_destroyed()) return;
-  // Becoming active closes the dynamic-attachment window (the
-  // new-session callback that just returned was the server's chance to
-  // attach): install the DefaultApplication if no application was attached.
   EnsureApplication();
   DCHECK(impl_->state()->wrapped);
   // Runs synchronously immediately after the new-session callback returns.
@@ -3914,8 +3877,6 @@ bool Session::HandshakeCompleted() {
   DCHECK(!is_server() || hello_processed_);
   // For a client, once the handshake is completed, we're active. The server
   // is active earlier, as 0RTT etc can fire before handshake completion.
-  // Becoming active closes the dynamic-attachment window: install the
-  // DefaultApplication now if no application was attached.
   if (!EnsureApplication()) return false;
   active_ = true;
 

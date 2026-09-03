@@ -25,8 +25,6 @@ const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');
 const sni = { '*': { keys: [key], certs: [cert] } };
 
-// The consumer warning must never fire in the first block (the HTTP/3
-// layer is the consumer) and must fire in the second (no consumer).
 // common.expectWarning is not usable here: importing node:quic emits
 // ExperimentalWarning, which it would reject as unexpected.
 const kWarning =
@@ -89,8 +87,6 @@ function failOnConsumerWarning(warning) {
 }
 
 // --- A session with no consumer destroys incoming streams ---
-// A raw QUIC session with no onstream callback has no way to observe an
-// incoming stream, so it is destroyed with the warning.
 {
   // Awaiting warned.promise is the assertion: the test times out if the
   // warning never fires.

@@ -108,10 +108,8 @@ class DefaultApplication final : public Session::Application {
   SessionTicket::AppData::Status ExtractSessionTicketAppData(
       const SessionTicket::AppData& app_data,
       SessionTicket::AppData::Source::Flag flag) override {
-    // Application data is only ever produced by named protocol
-    // applications, which validate their own. There is nothing here that
-    // can check it, so a ticket carrying any is ignored and the handshake
-    // falls back to a full 1-RTT exchange.
+    // Only protocol applications produce app data and only they can
+    // validate it, so a ticket carrying any must be ignored here.
     auto data = app_data.Get();
     if (data.has_value() && data->len != 0) {
       return SessionTicket::AppData::Status::TICKET_IGNORE_RENEW;
@@ -123,7 +121,7 @@ class DefaultApplication final : public Session::Application {
 
   void CollectSessionTicketAppData(
       SessionTicket::AppData* app_data) const override {
-    // Default sessions embed no application data in session tickets.
+    // Nothing to embed for a raw QUIC session.
   }
 
   bool ReceiveStreamOpen(stream_id id) override {

@@ -343,9 +343,8 @@ class Stream final : public AsyncWrap,
   void ReceiveStopSending(QuicError error);
   void ReceiveStreamReset(uint64_t final_size, QuicError error);
 
-  // Records receive-side activity on the stream (the received_at stat, which
-  // also feeds the idle-timeout clock). ReceiveData updates this for DATA
-  // payloads; applications must call it for non-DATA traffic they deliver.
+  // Records the received_at stat. ReceiveData does this for stream payloads;
+  // applications must call it for any other traffic they deliver.
   void RecordReceiveActivity();
 
   // Sends a reset stream to the peer to tell it we will not be sending any
@@ -449,8 +448,7 @@ class Stream final : public AsyncWrap,
   // will be called and the id will be assigned.
   void NotifyStreamOpened(stream_id id);
 
-  // Runs fn once the stream has a transport id: immediately if the stream is
-  // already open, otherwise queued and run in NotifyStreamOpened.
+  // Runs fn once the stream has a transport id, immediately if open already.
   void RunWhenOpen(std::function<void()> fn);
 
   ArenaSlotBase stats_slot_;

@@ -4,9 +4,8 @@
 // application error code instead of the previously hard-coded 0n.
 //
 // Two cases are exercised against the test fixture's non-h3 ALPN
-// (`quic-test`), a raw session with no application installed, which
-// exposes the native `internalErrorCode === 0x1n`
-// (NGTCP2_INTERNAL_ERROR) via session state:
+// (`quic-test`), a raw session with no application, whose native
+// `internalErrorCode` is `0x1n` (NGTCP2_INTERNAL_ERROR):
 //
 //   1. `writer.fail(plainError)` — peer receives RESET_STREAM with the
 //      session's `internalErrorCode` (`0x1`), proving the hard-coded

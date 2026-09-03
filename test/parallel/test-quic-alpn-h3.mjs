@@ -14,10 +14,8 @@ const { createPrivateKey } = await import('node:crypto');
 const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');
 
-// Test that the h3 ALPN negotiates normally but doesn't auto-activate
-// HTTP/3. ALPN is reported, not type-changing. HTTP/3 is used via
-// the HTTP/3 API explicitly.
-// Both server and client explicitly configure the h3 ALPN.
+// Test that negotiating the h3 ALPN does not itself activate HTTP/3: the
+// ALPN is reported, and HTTP/3 is only installed via the HTTP/3 API.
 
 const { createRequire } = await import('node:module');
 const require = createRequire(import.meta.url);
@@ -26,8 +24,7 @@ const { getQuicSessionState } = require('internal/quic/quic');
 const serverOpened = Promise.withResolvers();
 
 const serverEndpoint = await listen(mustCall(async (serverSession) => {
-  // ALPN negotiated h3, but with no application requested none has been
-  // selected yet: the attachment window is still open (type 0).
+  // No application selected yet (type 0), so a wrap is still possible.
   assert.strictEqual(serverSession.alpnProtocol, 'h3');
   assert.strictEqual(getQuicSessionState(serverSession).applicationType, 0);
   const info = await serverSession.opened;
@@ -45,17 +42,14 @@ const clientSession = await connect(serverEndpoint.address, {
   alpn: 'h3',
   servername: 'localhost',
   verifyPeer: 'manual',
-  // Application config is internal-only (kApplication) - user options
-  // are ignored. Applications integrate natively with their consumers
-  // so custom options would reliably break things.
+  // Ignored: the application is chosen internally, never by the user.
   application: 'http3',
 });
 
 async function checkClient() {
   const info = await clientSession.opened;
   assert.strictEqual(info.protocol, 'h3');
-  // The handshake completed without an HTTP/3 attach, so the
-  // DefaultApplication (type 1) was installed.
+  // No HTTP/3 attach happened, so the default application (type 1) is used.
   assert.strictEqual(getQuicSessionState(clientSession).applicationType, 1);
 }
 

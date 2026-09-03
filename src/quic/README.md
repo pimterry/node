@@ -15,7 +15,7 @@ The stack is layered as:
 ├─────────────────────────────────────────────┤
 │  Endpoint      — UDP socket, packet I/O     │
 │  Session       — QUIC connection (ngtcp2)   │
-│  Application   — protocol logic (optional)  │
+│  Application   — HTTP/3 or default protocol │
 │  Stream        — Bidirectional data flow    │
 ├─────────────────────────────────────────────┤
 │  ngtcp2 / nghttp3 / OpenSSL                 │
@@ -56,7 +56,7 @@ carry application data.
 | File               | Purpose                                                     |
 | ------------------ | ----------------------------------------------------------- |
 | `endpoint.h/cc`    | `Endpoint` — UDP binding, packet dispatch, retry/validation |
-| `session.h/cc`     | `Session` — QUIC connection state machine (\~4,700 lines)   |
+| `session.h/cc`     | `Session` — QUIC connection state machine                   |
 | `streams.h/cc`     | `Stream`, `Outbound`, `PendingStream` — data flow           |
 | `application.h/cc` | `Session::Application` base + `DefaultApplication`          |
 | `http3.h/cc`       | `Http3Application` + `Http3Binding` — nghttp3 integration   |
@@ -136,44 +136,37 @@ re-reading from the source.
 ### Application Abstraction
 
 `Session::Application` is a protocol-agnostic virtual interface that the
-Session delegates protocol-specific behavior to. A Session installs one
-from its `options.application` option (HTTP/3 is the only protocol
-application), if the application is known in advance, or a consumer
-attaches one later to wrap the session (see timing below).
-When no application is requested or attached, the `DefaultApplication` is
-installed once the dynamic-attachment window closes (a stream is created
-or the session becomes active); until then `application_` is null.
+Session delegates protocol-specific behavior to. It exists so that a
+built-in protocol can integrate at the C++ layer, for performance and
+low-level control, rather than being driven entirely from JavaScript.
+The implementations that ship in core:
 
-In effect, an Application acts as an optimization layer for built-in protocols
-like HTTP/3: instead of working entirely through the JS interface, it
-integrates at the C++ layer for performance and low-level control.
-
-Two implementations currently ship in core:
-
-* **`DefaultApplication`** (`application.cc`): The protocol-less default.
+* **`DefaultApplication`** (`application.cc`): the protocol-less default.
   Exposes every QUIC stream directly to JavaScript with no additional
   framing and pumps outbound stream data from its own send queue.
-* **`Http3Application`** (`http3.cc`): Requested under the name `http3`.
-  Wraps `nghttp3_conn` for HTTP/3 framing, header compression (QPACK), and
-  stream prioritization. Manages unidirectional control streams internally.
-  Its JS-facing capability is **`Http3Binding`**: one weakly session-bound
-  handle per session, created as the native attach operation, exposing the
-  HTTP/3-only operations and receiving the session-level HTTP/3 events.
+* **`Http3Application`** (`http3.cc`): requested under the name `http3`.
+  Wraps `nghttp3_conn` for HTTP/3 framing, header compression (QPACK) and
+  stream prioritization, and manages the unidirectional control streams
+  internally. Its JS-facing handle is the per-session `Http3Binding`,
+  created by the native attach operation `CreateHttp3Handle()`.
 
-Install timing has two paths. Using the `options.application` option configured
-up front, the Application is installed early, so it exists before any 0-RTT
-early data: immediately at construction for clients, and from the
-`OnClientHello` TLS callback for servers (see
-[Server handshake ordering](#server-handshake-ordering)). Alternatively, the
-consumer can install it later to wrap an existing session - this must occur
-either synchronously in the server's 'session' emit frame, or for a client
-before its handshake completes. Effectively the application must be attached
-before any events are emitted.
+Every live session has exactly one Application. It is installed either from
+the session's `application` option, when the protocol is known up front, or
+by a later attach that wraps an already-created session. If neither happens,
+`EnsureApplication()` installs the `DefaultApplication` as the attach window
+closes: when a stream is created or received, or when the session becomes
+active (starts delivering events to JS). `application_` is null only within
+that window.
 
-Because the server session is surfaced to JavaScript while TLS is still paused
-at the ClientHello, a late attach also precedes any 0-RTT early data. Attaching
-once the session is active (`is_active()`, i.e. delivering events to JS) is
-rejected.
+The window always closes before application data can flow. For a client the
+up-front application is installed at construction, and a later attach must
+happen before the handshake completes. For a server the up-front install
+happens in the `OnClientHello` callback, and because the session is surfaced
+to JavaScript while TLS is still paused there (see
+[Server handshake ordering](#server-handshake-ordering)), an attach made
+synchronously during the session emit also precedes any 0-RTT early data.
+`CreateHttp3Handle()` rejects an attach when the session is destroyed,
+already active, already has streams, or already has an application attached.
 
 ### Thread-Local Allocator
 
@@ -204,17 +197,13 @@ succeed but memory tracking is silently skipped.
 
 **Client**: `Endpoint::Connect()` builds a `Session::Config` with
 `Side::CLIENT`, creates a `TLSContext`, and calls `Session::Create()` →
-`ngtcp2_conn_client_new()`. An Application configured statically is
-installed immediately; otherwise a consumer can attach one until the
-first stream is created or the handshake completes, at which point the
-`DefaultApplication` is installed instead.
+`ngtcp2_conn_client_new()`. An Application configured up front is installed
+immediately (see [Application Abstraction](#application-abstraction)).
 
 **Server**: `Endpoint::Receive()` processes an Initial packet through
 address validation (retry tokens, LRU cache), then calls `Session::Create()`
-→ `ngtcp2_conn_server_new()`. An Application configured statically is
-installed during the initial handshake; otherwise a consumer may attach
-one in the session-delivery tick, after which the `DefaultApplication` is
-installed instead.
+→ `ngtcp2_conn_server_new()`. An Application configured up front is
+installed later, once the ClientHello names the protocol.
 
 ### Server handshake ordering
 

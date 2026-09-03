@@ -29,7 +29,6 @@ const serverEndpoint = await listen(mustCall((serverSession) => {
   serverSession.onstream = mustCall(async (stream) => {
     stream.onreset = mustCall((err) => {
       assert.strictEqual(err.code, 'ERR_QUIC_APPLICATION_ERROR');
-      // The native (no application) internal error code is 0x1n.
       assert.strictEqual(err.errorCode, 1n);
       serverResetSeen.resolve();
     });

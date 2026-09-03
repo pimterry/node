@@ -442,8 +442,7 @@ class Endpoint::UDP::Impl final : public HandleWrap {
 
     // UV_UDP_MMSG_FREE signals the end of a recvmmsg batch — the
     // buffer can be reused. Since our buffer is pre-allocated and
-    // persistent, there is nothing to free. The cached batch timestamp
-    // is reset so the next batch takes a fresh one.
+    // persistent, only the cached batch timestamp needs resetting.
     if (flags & UV_UDP_MMSG_FREE) {
       impl->recv_batch_ts_ = 0;
       return;

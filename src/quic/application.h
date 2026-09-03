@@ -113,9 +113,8 @@ class Session::Application : public MemoryRetainer {
     // By default do nothing.
   }
 
-  // Sets application data for the session ticket (e.g. http/3 settings).
-  // The format is private to the application, which validates its own data
-  // again in ExtractSessionTicketAppData() on resumption.
+  // Sets the application data to embed in the session ticket (e.g. http/3
+  // settings). The format is private to each application.
   virtual void CollectSessionTicketAppData(
       SessionTicket::AppData* app_data) const = 0;
 

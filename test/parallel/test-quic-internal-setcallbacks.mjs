@@ -44,8 +44,8 @@ quic.setCallbacks(callbacks);
 // Multiple calls should just be ignored.
 quic.setCallbacks(callbacks);
 
-// The HTTP/3 application-event callbacks are registered separately (by the
-// HTTP/3 consumer layer) and validate their own set.
+// The HTTP/3 application callbacks are registered separately, and validated
+// as their own independent set.
 const http3Callbacks = {
   onSessionApplication() {},
   onSessionGoaway() {},

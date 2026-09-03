@@ -133,8 +133,7 @@ inline size_t FormatPriority(char* buf, size_t buflen, const nghttp3_pri& pri) {
 // and parsed here by the registered parse hook. The QUIC core never
 // knows these field names.
 struct Http3Settings final {
-  // The maximum number of header pairs permitted for a Stream
-  // (local enforcement limit, not a wire setting).
+  // Local enforcement limit, not a wire setting.
   uint64_t max_header_pairs = DEFAULT_MAX_HEADER_LIST_PAIRS;
 
   // The maximum total number of header bytes (including header
@@ -153,9 +152,8 @@ struct Http3Settings final {
 
   bool enable_connect_protocol = true;
 
-  // SETTINGS_H3_DATAGRAM (RFC 9297). HTTP/3 datagrams are not yet
-  // supported, so this is always false and the setting is never
-  // advertised. We reserve the setting logic to enable later.
+  // SETTINGS_H3_DATAGRAM (RFC 9297). Never advertised: HTTP/3 datagrams
+  // are not supported yet.
   bool enable_datagrams = false;
 
   operator const nghttp3_settings() const;
@@ -333,8 +331,7 @@ struct Http3HeaderTraits {
 
 using Http3Header = NgHeader<Http3HeaderTraits>;
 
-// The Session::Application implementation for HTTP/3, which owns the nghttp3
-// connection and all HTTP/3 protocol logic and state.
+// The Session::Application implementation for HTTP/3, wrapping nghttp3.
 class Http3Application final : public Session::Application {
  public:
   Http3Application(Session* session, const Http3Settings& settings)
@@ -352,11 +349,8 @@ class Http3Application final : public Session::Application {
   }
 
   // ==========================================================================
-  // The JS-facing Http3Binding handle bound to this application. Set once
-  // when the handle is created (creating it is the native HTTP/3 attach
-  // operation); session-level HTTP/3 events (GOAWAY, ORIGIN, SETTINGS) are
-  // emitted on it rather than on the generic session handle. The reference
-  // is weak: if JS releases the handle, the events are dropped.
+  // The JS-facing Http3Binding handle: created once per session, and the
+  // target for session-level events. Weak, so events drop if JS releases it.
 
   void set_binding(AsyncWrap* binding) {
     CHECK(!has_binding_);
@@ -366,14 +360,11 @@ class Http3Application final : public Session::Application {
 
   bool has_binding() const { return has_binding_; }
 
-  // Whether JS has registered an onorigin listener; used to skip
-  // building the origins array when nobody is listening.
   void set_origin_listener(bool on) { has_origin_listener_ = on; }
 
   // ==========================================================================
-  // HTTP/3 events reported up to the JS layer via the Http3Binding. The
-  // server session is surfaced to JS while the handshake is still paused at
-  // the ClientHello, so the binding is in place before any of these can fire.
+  // Session-level HTTP/3 events. The binding is always in place first: JS
+  // sees the server session while the handshake is paused at ClientHello.
 
   void EmitGoaway(stream_id last_stream_id) {
     Session& s = session();
@@ -698,8 +689,7 @@ class Http3Application final : public Session::Application {
 
     const uint8_t* buf = reinterpret_cast<const uint8_t*>(data->base);
 
-    // buf[0] is the version. The data is only ever routed here by the
-    // application that wrote it, so it carries no type tag.
+    // No type tag: only the application that wrote the data reads it back.
     if (buf[0] != kSessionTicketAppDataVersion) {
       Debug(&session(),
             "Ticket app data rejected: version=%d (expected %d)",
@@ -782,9 +772,7 @@ class Http3Application final : public Session::Application {
         stream->id(),
         code,
         0);
-    // If the call is successful, the Http3Application::OnStreamClose
-    // callback will be invoked when the stream is ready to be closed. We'll
-    // handle destroying the actual Stream object there.
+    // On success, OnStreamClose will destroy the Stream object later.
     if (rv == 0) return;
 
     if (rv == NGHTTP3_ERR_STREAM_NOT_FOUND) {
@@ -964,10 +952,8 @@ class Http3Application final : public Session::Application {
         data->stream = session().FindStream(data->id);
       }
     } else {
-      // Nothing can be pulled right now (connection flow control is
-      // exhausted). Present an empty result: the caller reuses a single
-      // StreamData across send-loop iterations, so the fields must not
-      // be left holding the previous iteration's stream.
+      // Nothing to pull. Clear the result: the caller reuses one StreamData
+      // across send-loop iterations, so stale fields would leak through.
       data->id = -1;
       data->count = 0;
       data->fin = 0;
@@ -1324,13 +1310,11 @@ class Http3Application final : public Session::Application {
     Debug(&session(),
           "HTTP/3 application received updated settings: %s",
           options_);
-    // Report the negotiated settings up to the session/JS layer.
     EmitApplicationSettings();
   }
 
-  // Inbound header-block accumulation, keyed by stream id. Entries are
-  // created by the header callbacks and erased on stream close (or
-  // wholesale on 0-RTT rejection).
+  // Inbound header blocks, keyed by stream id. Erased on stream close, and
+  // wholesale on 0-RTT rejection.
   struct StreamHeaderState {
     std::vector<std::unique_ptr<Http3Header>> headers;
     size_t headers_length = 0;
@@ -1342,10 +1326,8 @@ class Http3Application final : public Session::Application {
   Http3Settings options_;
   Http3ConnectionPointer conn_;
 
-  // The JS-facing Http3Binding handle, if one has been created. Weak so
-  // that the binding's JS lifetime is not extended by the application;
-  // has_binding_ stays set even if the handle is collected, enforcing
-  // that only one handle is ever created per session.
+  // Weak, so the application does not extend the handle's JS lifetime;
+  // has_binding_ outlives collection to keep it to one handle per session.
   BaseObjectWeakPtr<AsyncWrap> binding_;
   bool has_binding_ = false;
   bool has_origin_listener_ = false;
@@ -1381,8 +1363,7 @@ class Http3Application final : public Session::Application {
     return app;
   }
 
-  // Persist the Stream* in the stream user data, so we can look it
-  // up directly without a FindStream map lookup every time.
+  // Lets the callbacks skip a FindStream lookup.
   void BindStreamUserData(stream_id id, Stream* stream) {
     if (conn_) nghttp3_conn_set_stream_user_data(*this, id, stream);
   }
@@ -1781,13 +1762,8 @@ class Http3Application final : public Session::Application {
       on_stream_close};
 };
 
-// The per-session JS-facing HTTP/3 handle (kHttp3Handle): the native
-// capability through which JS reaches the HTTP/3-only operations
-// (headers, trailers, priority, settings) and receives the session-level
-// HTTP/3 events (GOAWAY, ORIGIN, SETTINGS). Exactly one exists per
-// session and creating it is the native HTTP/3 attach operation (see
-// CreateHttp3Handle). It holds a weak reference to its Session and only
-// operates on that session's streams.
+// The per-session JS-facing HTTP/3 handle (kHttp3Handle): the HTTP/3-only
+// operations and the session-level HTTP/3 events. Weakly holds its Session.
 class Http3Binding final : public AsyncWrap {
  public:
   static BaseObjectPtr<Http3Binding> Create(Session* session);
@@ -1866,10 +1842,8 @@ inline Http3Application& Http3App(Session& session) {
   return static_cast<Http3Application&>(session.application());
 }
 
-// Unwraps the stream argument of a binding stream operation and checks
-// that it belongs to the binding's (still live) session. Returns nullptr
-// when the operation cannot proceed; a stream from any other session is
-// rejected with an error.
+// Unwraps the stream argument and checks it belongs to the binding's (still
+// live) session; a stream from another session is rejected with an error.
 Stream* GetOwnStream(Http3Binding* binding,
                      Session* session,
                      Local<Value> value) {
@@ -1919,8 +1893,7 @@ JS_METHOD_IMPL(Http3Binding::SendHeaders) {
       Http3App(session).SubmitHeaders(*stream, headers, flags));
 }
 
-// Informational/trailing headers are only sent on open streams so they need
-// no pending-stream deferral.
+// Informational and trailing headers need no pending-stream deferral.
 JS_METHOD_IMPL(Http3Binding::SendInformationalHeaders) {
   Http3Binding* binding;
   ASSIGN_OR_RETURN_UNWRAP(&binding, args.This());
@@ -2012,9 +1985,8 @@ void CreateHttp3Handle(const FunctionCallbackInfo<Value>& args) {
   Session* session;
   ASSIGN_OR_RETURN_UNWRAP(&session, args[0]);
 
-  // has_application() and is_active() are both false on a destroyed
-  // session, so without this the attach below would run against a torn
-  // down session.
+  // has_application() and is_active() are both false on a destroyed session,
+  // so the checks below would not catch one.
   if (session->is_destroyed()) {
     THROW_ERR_INVALID_STATE(
         session->env(),
@@ -2041,15 +2013,13 @@ void CreateHttp3Handle(const FunctionCallbackInfo<Value>& args) {
         std::make_unique<Http3Application>(session, settings));
 
     if (session->is_server() && !session->application().Start()) {
-      // Start() failed (e.g. the peer's initial_max_streams_uni is < 3), so
-      // the application cannot run HTTP/3.
+      // e.g. the peer's initial_max_streams_uni is < 3.
       THROW_ERR_INVALID_STATE(env,
                               "The HTTP/3 application could not be started");
       return;
     }
   } else if (!args[1]->IsUndefined()) {
-    // The application (and its settings) were configured when the session
-    // was created; new settings cannot be applied now.
+    // Settings are fixed when the application is created.
     THROW_ERR_INVALID_STATE(
         env, "The QUIC session already has its HTTP/3 settings configured");
     return;
@@ -2074,9 +2044,7 @@ void RegisterHttp3ExternalReferences(ExternalReferenceRegistry* registry) {
 }
 
 void InitHttp3PerContext(Local<Object> target) {
-  // The HTTP/3 header kind/flags values consumed by the HTTP/3 JS layer when
-  // calling the kHttp3Handle methods. These are http3-owned constants exposed
-  // on the quic binding object.
+  // http3-owned constants consumed by the HTTP/3 JS layer.
   constexpr int QUIC_STREAM_HEADERS_KIND_HINTS =
       static_cast<uint8_t>(HeadersKind::HINTS);
   constexpr int QUIC_STREAM_HEADERS_KIND_INITIAL =
@@ -2096,9 +2064,6 @@ void InitHttp3PerContext(Local<Object> target) {
 }
 
 namespace {
-// Resolves the effective HTTP/3 settings for a session's options: the
-// consumer-supplied settings (or defaults). SETTINGS_H3_DATAGRAM stays
-// disabled (HTTP/3 datagrams not yet supported).
 Http3Settings ResolveHttp3Settings(const Session::Options& options) {
   return options.application_settings
              ? *std::static_pointer_cast<const Http3Settings>(

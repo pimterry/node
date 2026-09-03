@@ -1,8 +1,7 @@
 // Flags: --experimental-quic --experimental-stream-iter --no-warnings
 
-// Test: a client's initial request priority (set via request({ priority }))
-// reaches the server as an RFC 9218 `priority` request header, and the
-// server's stream.priority getter reflects it.
+// Test: a request's initial priority reaches the server (sent as an RFC 9218
+// `priority` request header) and is reported by stream.priority there.
 
 import { hasQuic, skip, mustCall } from '../common/index.mjs';
 import assert from 'node:assert';

@@ -1,8 +1,7 @@
 // Flags: --experimental-quic --experimental-stream-iter --no-warnings
 
-// A request/response round-trip through http3.connect/listen, exercising
-// onstream delivery (wrapped streams), request(), header events,
-// and bodies in both directions.
+// A request/response round-trip through connectHttp3/listenHttp3: onstream
+// delivery, request(), header events, and bodies in both directions.
 
 import { hasQuic, skip, mustCall } from '../common/index.mjs';
 import assert from 'node:assert';

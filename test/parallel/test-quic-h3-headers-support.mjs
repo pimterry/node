@@ -1,13 +1,8 @@
 // Flags: --experimental-quic --no-warnings
 
-// Test: QuicStream/QuicSession expose no HTTP/3 surface.
-// The HTTP/3 members (sendHeaders, sendInformationalHeaders, sendTrailers,
-// headers, onheaders, oninfo, ontrailers, onwanttrailers) were stripped from
-// the public node:quic API; the HTTP/3 layer reaches them via internal
-// symbols.
-// Regardless of the negotiated ALPN, plain QUIC streams must expose none of
-// them: the methods are undefined and the callback names are plain inert
-// expando properties with no prototype accessors behind them.
+// Test: QuicStream/QuicSession expose no HTTP/3 surface, whatever the
+// negotiated ALPN. The HTTP/3 layer reaches those members through internal
+// symbols instead.
 
 import { hasQuic, skip, mustCall } from '../common/index.mjs';
 import assert from 'node:assert';
@@ -24,7 +19,6 @@ const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');
 const encoder = new TextEncoder();
 
-// No h3 accessors or methods exist on the prototypes at all.
 for (const name of ['sendHeaders', 'sendInformationalHeaders', 'sendTrailers',
                     'headers', 'pendingTrailers', 'onheaders', 'oninfo',
                     'ontrailers', 'onwanttrailers']) {
@@ -43,8 +37,7 @@ function assertNoH3Surface(stream) {
   assert.strictEqual(stream.headers, undefined);
   assert.strictEqual(stream.pendingTrailers, undefined);
 
-  // Assigning the old callback names just creates inert expandos; no
-  // prototype setter intercepts them.
+  // The h3 callback names are inert expandos: no setter intercepts them.
   const inert = () => {};
   stream.onheaders = inert;
   assert.strictEqual(stream.onheaders, inert);
@@ -82,7 +75,6 @@ const stream = await clientSession.createBidirectionalStream({
   body: encoder.encode('ping'),
 });
 
-// Client side: no h3 surface either.
 assertNoH3Surface(stream);
 
 await serverDone.promise;

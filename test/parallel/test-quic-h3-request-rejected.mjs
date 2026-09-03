@@ -23,8 +23,6 @@ const cert = fixtures.readKey('agent1-cert.pem');
 // RFC 9114 H3_REQUEST_REJECTED.
 const H3_REQUEST_REJECTED = 0x10bn;
 
-// The server registers no onstream handler, so an incoming request stream
-// is rejected on arrival.
 const serverEndpoint = await listenHttp3(mustCall((serverSession) => {
   serverSession.onerror = () => {};
 }), {

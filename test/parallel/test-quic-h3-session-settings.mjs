@@ -1,13 +1,8 @@
 // Flags: --experimental-quic --experimental-stream-iter --no-warnings --expose-internals
 
-// Test: http3Session.settings
-// Verifies that the effective HTTP/3 settings are exposed on the
-// Http3Session wrapper, are a null-prototype object, reflect the values
-// configured through the `settings` option of http3.connect()/listen()
-// (some values are subsequently confirmed/updated by the peer's SETTINGS
-// frame; both sides are configured identically here so the values are
-// stable), and return null after close. Also pins that h3 sessions
-// (unlike raw QUIC sessions) report an installed application.
+// Test: http3Session.settings reports the effective HTTP/3 settings, as
+// configured by the `settings` option or at dynamic attach, and null once
+// the session closes.
 
 import { hasQuic, skip, mustCall } from '../common/index.mjs';
 import assert from 'node:assert';
@@ -27,6 +22,8 @@ const { createPrivateKey } = await import('node:crypto');
 const key = createPrivateKey(fixtures.readKey('agent1-key.pem'));
 const cert = fixtures.readKey('agent1-cert.pem');
 
+// Applied to both peers: some values are confirmed by the peer's SETTINGS
+// frame, so an identical config keeps what reads back stable.
 const customSettings = {
   maxHeaderPairs: 50n,
   maxHeaderLength: 8192n,
@@ -59,8 +56,6 @@ const serverDone = Promise.withResolvers();
 
 const serverEndpoint = await listen(mustCall((serverSession) => {
   serverSession.onstream = mustCall(async (stream) => {
-    // The application is installed from the first flight, so the
-    // settings are available as soon as the session is surfaced.
     checkSettings(serverSession.settings, 'server');
     assert.strictEqual(
       getQuicSessionState(serverSession.session).applicationType, 2);
@@ -85,8 +80,6 @@ const clientSession = await connect(serverEndpoint.address, {
 });
 await clientSession.opened;
 
-// The client installs its application at session creation, so the
-// settings are available immediately after the session opens.
 checkSettings(clientSession.settings, 'client');
 assert.strictEqual(getQuicSessionState(clientSession.session).applicationType, 2);
 assert.strictEqual(getQuicSessionState(clientSession.session).isServer, false);
@@ -103,15 +96,12 @@ const stream = await clientSession.request({
 for await (const _ of stream) { /* drain */ }
 await Promise.all([stream.closed, serverDone.promise]);
 
-// After close, settings should return null.
 await clientSession.close();
 assert.strictEqual(clientSession.settings, null);
 
 await serverEndpoint.close();
 
-// Dynamic attach: wrapping a raw QUIC session with
-// new Http3Session(session, { settings }) applies the settings at
-// attach time, and they read back the same way.
+// Settings passed to a dynamic attach apply the same way.
 {
   const { listen: quicListen, connect: quicConnect } =
     await import('node:quic');

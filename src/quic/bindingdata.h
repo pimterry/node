@@ -71,7 +71,6 @@ class SessionManager;
   V(stream_headers, StreamHeaders)                                             \
   V(stream_trailers, StreamTrailers)
 
-// All of the callback slots, regardless of which JS module registers them.
 #define QUIC_ALL_JS_CALLBACKS(V)                                               \
   QUIC_JS_CALLBACKS(V)                                                         \
   QUIC_HTTP3_JS_CALLBACKS(V)
@@ -308,9 +307,6 @@ class BindingData final
   // bridge out to the JS API.
   JS_METHOD(SetCallbacks);
 
-  // Installs the HTTP/3 application-event callback functions. Registered
-  // separately from SetCallbacks by the HTTP/3 consumer layer when it
-  // is first loaded in a realm.
   JS_METHOD(SetHttp3Callbacks);
 
   // Lazily-created per-Realm SessionManager. Centralizes CID -> Session
