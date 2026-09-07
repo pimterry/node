@@ -35,8 +35,8 @@ if (!hasQuic) {
 
 const { listen, connect } = await import('../common/quic.mjs');
 
-// Short idle timeout so the server cleans up quickly after we destroy
-// the client without sending CONNECTION_CLOSE.
+// Short idle timeout so the server cleans up quickly in the sections that
+// never destroy the client session with an error.
 const transportParams = { maxIdleTimeout: 1 };
 
 // -------------------------------------------------------------------
@@ -45,7 +45,12 @@ const transportParams = { maxIdleTimeout: 1 };
 {
   const serverDone = Promise.withResolvers();
   const serverEndpoint = await listen(mustCall(async (serverSession) => {
-    await serverSession.closed;
+    await assert.rejects(serverSession.closed, {
+      code: 'ERR_QUIC_TRANSPORT_ERROR',
+      errorName: 'INTERNAL_ERROR',
+      errorCode: 1n,
+      reason: 'reentrant destroy test',
+    });
     serverDone.resolve();
   }), { transportParams });
 
@@ -109,7 +114,12 @@ const transportParams = { maxIdleTimeout: 1 };
     // the client may destroy before the server processes the stream open.
     // We don't make assertions about server stream activity in this case;
     // the test is purely about client-side re-entrancy.
-    await serverSession.closed;
+    await assert.rejects(serverSession.closed, {
+      code: 'ERR_QUIC_TRANSPORT_ERROR',
+      errorName: 'INTERNAL_ERROR',
+      errorCode: 1n,
+      reason: 'cascade reentrant destroy test',
+    });
     serverDone.resolve();
   }), { transportParams });
 
@@ -151,7 +161,9 @@ const transportParams = { maxIdleTimeout: 1 };
 {
   const serverDone = Promise.withResolvers();
   const serverEndpoint = await listen(mustCall(async (serverSession) => {
-    try { await serverSession.closed; } catch { /* server cascade-close */ }
+    // Only the stream is destroyed with an error here; the session itself is
+    // closed gracefully, so this resolves.
+    await serverSession.closed;
     serverDone.resolve();
   }), { transportParams });
 

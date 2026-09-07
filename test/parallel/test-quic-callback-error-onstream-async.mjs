@@ -38,7 +38,9 @@ const stream = await clientSession.createBidirectionalStream({
   body: new TextEncoder().encode('trigger onstream'),
 });
 
-// The client session closes via CONNECTION_CLOSE or idle timeout
-// after the server session is destroyed by the async rejection.
-await Promise.all([stream.closed, clientSession.closed]);
+// The server's destroy reaches us as a CONNECTION_CLOSE carrying the
+// rejection's message, so both the stream and the session report it.
+const expected = { code: 'ERR_QUIC_TRANSPORT_ERROR', reason: testError.message };
+await assert.rejects(stream.closed, expected);
+await assert.rejects(clientSession.closed, expected);
 await serverEndpoint.close();

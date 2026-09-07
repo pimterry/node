@@ -4,10 +4,9 @@
 // destroy() without error resolves the closed promise.
 // destroy(error) rejects the closed promise with that error.
 // destroy() works without a prior close() call.
-// Note: destroy() is forceful and does not send CONNECTION_CLOSE.
-// The server session remains alive until idle timeout unless we also
-// destroy the server session explicitly. We use a short idle timeout
-// to keep the tests fast, and destroy both sides in each section.
+// Note: destroy() without an error is a silent local teardown, so the
+// server session there remains alive until idle timeout. A short idle
+// timeout keeps those sections fast.
 
 import { hasQuic, skip, mustCall } from '../common/index.mjs';
 import assert from 'node:assert';
@@ -55,7 +54,12 @@ const transportParams = { maxIdleTimeout: 1 };
   const serverDone = Promise.withResolvers();
 
   const serverEndpoint = await listen(mustCall(async (serverSession) => {
-    await serverSession.closed;
+    await assert.rejects(serverSession.closed, {
+      code: 'ERR_QUIC_TRANSPORT_ERROR',
+      errorName: 'INTERNAL_ERROR',
+      errorCode: 1n,
+      reason: 'intentional destroy error',
+    });
     serverDone.resolve();
   }), { transportParams });
 

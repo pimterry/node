@@ -1062,6 +1062,11 @@ set, the `onerror` callback is invoked before destruction. The
 provided, the `CONNECTION_CLOSE` frame sent to the peer will include the
 specified error code, type, and reason.
 
+When `error` is provided without `options`, the `CONNECTION_CLOSE` frame
+defaults to the transport error code `0x1` (`INTERNAL_ERROR`) with the
+error's message as the reason. No frame is sent if the handshake has not
+completed, or if the session is already closing.
+
 ### `session.destroyed`
 
 <!-- YAML

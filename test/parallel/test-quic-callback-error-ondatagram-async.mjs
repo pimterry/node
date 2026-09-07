@@ -38,5 +38,10 @@ await clientSession.opened;
 await clientSession.sendDatagram(new Uint8Array([1, 2, 3]));
 
 await serverDone.promise;
-await clientSession.closed;
+// The server's destroy reaches us as a CONNECTION_CLOSE carrying the
+// rejection's message.
+await assert.rejects(clientSession.closed, {
+  code: 'ERR_QUIC_TRANSPORT_ERROR',
+  reason: testError.message,
+});
 await serverEndpoint.close();

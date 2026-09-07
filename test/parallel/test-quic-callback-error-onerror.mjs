@@ -17,18 +17,34 @@ if (!hasQuic) {
 const { listen, connect } = await import('../common/quic.mjs');
 
 // quic.session.error fires when a session is destroyed with an error.
-// It should fire once for the first client session (destroyed with error)
-// and not for the second (destroyed without error).
+// It fires twice for the first pair: once for the client session destroyed
+// with the error, and once for its server peer, destroyed by the
+// CONNECTION_CLOSE that carries it. The second client session is destroyed
+// without an error, which stays silent.
 dc.subscribe('quic.session.error', mustCall((msg) => {
   assert.ok(msg.session, 'session.error should include session');
   assert.ok(msg.error, 'session.error should include error');
-}));
+}, 2));
 
 const transportParams = { maxIdleTimeout: 1 };
 
 // All tested using a single endpoint with two client sessions.
+let serverSessions = 0;
 const serverEndpoint = await listen(mustCall(async (serverSession) => {
-  await serverSession.closed;
+  if (++serverSessions === 1) {
+    // Destroyed with an error, which reaches us as a CONNECTION_CLOSE
+    // carrying the error's message.
+    await assert.rejects(serverSession.closed, {
+      code: 'ERR_QUIC_TRANSPORT_ERROR',
+      errorName: 'INTERNAL_ERROR',
+      errorCode: 1n,
+      reason: 'destroy with error',
+    });
+  } else {
+    // Destroyed without an error: nothing is sent, so this session ends on
+    // its idle timer with no error to report.
+    await serverSession.closed;
+  }
 }, 2), { transportParams });
 
 // First client: destroy WITH error — onerror fires.
