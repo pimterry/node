@@ -13,7 +13,7 @@ if (!hasQuic) {
   skip('QUIC is not enabled');
 }
 
-const { listen, connect } = await import('node:quic');
+const { listen, connect, Http3Session } = await import('node:quic');
 const { createPrivateKey } = await import('node:crypto');
 const { bytes } = await import('stream/iter');
 
@@ -29,13 +29,15 @@ const decoder = new TextDecoder();
   const originReceived = Promise.withResolvers();
   const serverDone = Promise.withResolvers();
 
-  const serverEndpoint = await listen(mustCall(async (ss) => {
+  const serverEndpoint = await listen(mustCall(async (quicSession) => {
+    const ss = new Http3Session(quicSession);
     ss.onstream = mustCall(async (stream) => {
       await stream.closed;
       ss.close();
       serverDone.resolve();
     });
   }), {
+    alpn: ['h3'],
     sni: {
       // Wildcard entry should NOT appear in ORIGIN frame.
       '*': { keys: [key], certs: [cert] },
@@ -50,23 +52,26 @@ const decoder = new TextDecoder();
     }),
   });
 
-  const clientSession = await connect(serverEndpoint.address, {
-    servername: 'example.com',
-    verifyPeer: 'manual',
-    // Client receives ORIGIN frame via onorigin callback.
-    onorigin: mustCall(function(origins) {
-      assert.ok(Array.isArray(origins));
-      // The origins should include the specific SNI hostnames.
-      assert.ok(origins.length >= 2);
-      // The wildcard (*) should NOT be in the list.
-      const originStrings = origins.join(',');
-      assert.ok(originStrings.includes('example.com'), 'should include example.com');
-      assert.ok(originStrings.includes('api.example.com'),
-                'should include api.example.com');
-      assert.ok(!originStrings.includes('*'), 'should not include wildcard');
-      originReceived.resolve();
-    }),
-  });
+  const clientSession = new Http3Session(
+    await connect(serverEndpoint.address, {
+      alpn: 'h3',
+      servername: 'example.com',
+      verifyPeer: 'manual',
+    }), {
+      // Client receives ORIGIN frame via onorigin callback.
+      onorigin: mustCall(function(origins) {
+        assert.ok(Array.isArray(origins));
+        // The origins should include the specific SNI hostnames.
+        assert.ok(origins.length >= 2);
+        // The wildcard (*) should NOT be in the list.
+        const originStrings = origins.join(',');
+        assert.ok(originStrings.includes('example.com'), 'should include example.com');
+        assert.ok(originStrings.includes('api.example.com'),
+                  'should include api.example.com');
+        assert.ok(!originStrings.includes('*'), 'should not include wildcard');
+        originReceived.resolve();
+      }),
+    });
   await clientSession.opened;
 
   const stream = await clientSession.createBidirectionalStream({
@@ -97,13 +102,15 @@ const decoder = new TextDecoder();
   const originReceived = Promise.withResolvers();
   const serverDone = Promise.withResolvers();
 
-  const serverEndpoint = await listen(mustCall(async (ss) => {
+  const serverEndpoint = await listen(mustCall(async (quicSession) => {
+    const ss = new Http3Session(quicSession);
     ss.onstream = mustCall(async (stream) => {
       await stream.closed;
       ss.close();
       serverDone.resolve();
     });
   }), {
+    alpn: ['h3'],
     sni: {
       '*': { keys: [key], certs: [cert] },
       // Non-default port → origin includes port.
@@ -128,41 +135,44 @@ const decoder = new TextDecoder();
     }),
   });
 
-  const clientSession = await connect(serverEndpoint.address, {
-    servername: 'custom-port.example.com',
-    verifyPeer: 'manual',
-    onorigin: mustCall(function(origins) {
-      assert.ok(Array.isArray(origins));
+  const clientSession = new Http3Session(
+    await connect(serverEndpoint.address, {
+      alpn: 'h3',
+      servername: 'custom-port.example.com',
+      verifyPeer: 'manual',
+    }), {
+      onorigin: mustCall(function(origins) {
+        assert.ok(Array.isArray(origins));
 
-      // Custom port included in origin string.
-      assert.ok(origins.includes('https://custom-port.example.com:8443'),
-                'should include origin with custom port');
+        // Custom port included in origin string.
+        assert.ok(origins.includes('https://custom-port.example.com:8443'),
+                  'should include origin with custom port');
 
-      // Default port 443 omitted from origin string.
-      assert.ok(origins.includes('https://default-port.example.com'),
-                'should include origin without port for 443');
-      // Verify port 443 is NOT appended.
-      const defaultPortOrigin = origins.find((o) =>
-        o.includes('default-port.example.com'));
-      assert.ok(!defaultPortOrigin.includes(':443'),
-                'default port 443 should be omitted');
+        // Default port 443 omitted from origin string.
+        assert.ok(origins.includes('https://default-port.example.com'),
+                  'should include origin without port for 443');
+        // Verify port 443 is NOT appended.
+        const defaultPortOrigin = origins.find((o) =>
+          o.includes('default-port.example.com'));
+        assert.ok(!defaultPortOrigin.includes(':443'),
+                  'default port 443 should be omitted');
 
-      // Non-authoritative entry excluded.
-      const allOrigins = origins.join(',');
-      assert.ok(!allOrigins.includes('not-authoritative'),
-                'non-authoritative entry should be excluded');
+        // Non-authoritative entry excluded.
+        const allOrigins = origins.join(',');
+        assert.ok(!allOrigins.includes('not-authoritative'),
+                  'non-authoritative entry should be excluded');
 
-      // Explicitly authoritative entry included.
-      assert.ok(allOrigins.includes('authoritative.example.com'),
-                'explicitly authoritative entry should be included');
+        // Explicitly authoritative entry included.
+        assert.ok(allOrigins.includes('authoritative.example.com'),
+                  'explicitly authoritative entry should be included');
 
-      // Default authoritative (true when omitted) included.
-      assert.ok(allOrigins.includes('default-auth.example.com'),
-                'default authoritative entry should be included');
+        // Default authoritative (true when omitted) included.
+        assert.ok(allOrigins.includes('default-auth.example.com'),
+                  'default authoritative entry should be included');
 
-      originReceived.resolve();
-    }),
-  });
+        originReceived.resolve();
+      }),
+    });
   await clientSession.opened;
 
   const stream = await clientSession.createBidirectionalStream({

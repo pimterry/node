@@ -41,7 +41,7 @@ class SessionManager;
 #define QUIC_JS_CALLBACKS(V)                                                   \
   V(endpoint_close, EndpointClose)                                             \
   V(session_close, SessionClose)                                               \
-  V(session_application, SessionApplication)                                   \
+  V(session_settings, SessionSettings)                                         \
   V(session_early_data_rejected, SessionEarlyDataRejected)                     \
   V(session_goaway, SessionGoaway)                                             \
   V(session_datagram, SessionDatagram)                                         \
@@ -326,6 +326,8 @@ class BindingData final
   void set_transport_params_template(v8::Local<v8::DictionaryTemplate> tmpl);
   v8::Local<v8::DictionaryTemplate> transport_params_template() const;
 
+  v8::Local<v8::Symbol> http3_settings_symbol();
+
   void set_application_options_template(v8::Local<v8::DictionaryTemplate> tmpl);
   v8::Local<v8::DictionaryTemplate> application_options_template() const;
 
@@ -349,6 +351,7 @@ class BindingData final
 
   v8::Global<v8::DictionaryTemplate> transport_params_template_;
   v8::Global<v8::DictionaryTemplate> application_options_template_;
+  v8::Global<v8::Symbol> http3_settings_symbol_;
 
 #define V(name, _) v8::Global<v8::Function> name##_callback_;
   QUIC_JS_CALLBACKS(V)

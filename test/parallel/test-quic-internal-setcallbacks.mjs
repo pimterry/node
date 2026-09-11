@@ -13,7 +13,7 @@ const callbacks = {
   onEndpointClose() {},
   onSessionNew() {},
   onSessionClose() {},
-  onSessionApplication() {},
+  onSessionSettings() {},
   onSessionDatagram() {},
   onSessionDatagramStatus() {},
   onSessionHandshake() {},
