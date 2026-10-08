@@ -1379,7 +1379,7 @@ void Endpoint::Receive(const uint8_t* data,
     }
   }
 
-  const auto receive = [&](Session* session,
+  const auto receive = [&](const BaseObjectPtr<Session>& session,
                            const uint8_t* pkt_data,
                            size_t pkt_len,
                            const SocketAddress& local_address,
@@ -1406,8 +1406,7 @@ void Endpoint::Receive(const uint8_t* data,
     // been scheduled already in this burst.
     if (!session->is_destroyed() && !session->flags_.pending_flush) {
       session->flags_.pending_flush = true;
-      BindingData::Get(env()).ScheduleSessionFlush(
-          BaseObjectPtr<Session>(session));
+      BindingData::Get(env()).ScheduleSessionFlush(session);
     }
   };
 
@@ -1455,7 +1454,7 @@ void Endpoint::Receive(const uint8_t* data,
     if (session->is_destroyed()) [[unlikely]]
       return;
 
-    receive(session.get(),
+    receive(session,
             pkt_data,
             pkt_len,
             config.local_address,
@@ -1770,7 +1769,7 @@ void Endpoint::Receive(const uint8_t* data,
       // If the session happens to have been destroyed already, we'll
       // just ignore the packet.
       if (!session->is_destroyed()) [[likely]] {
-        receive(session,
+        receive(BaseObjectPtr<Session>(session),
                 pkt_data,
                 pkt_len,
                 local_address,
@@ -1938,7 +1937,7 @@ void Endpoint::Receive(const uint8_t* data,
   // If we got here, the dcid matched the scid of a known local session. Yay!
   // The session will take over any further processing of the packet.
   Debug(this, "Dispatching packet to known session");
-  receive(session.get(), data, len, addr, remote_address, dcid, scid);
+  receive(session, data, len, addr, remote_address, dcid, scid);
 
   // It is important to note that the session may have been destroyed during
   // the call to receive(...). If that's the case, the session object still

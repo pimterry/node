@@ -1765,7 +1765,7 @@ struct Session::Impl final : public MemoryRetainer {
 
 // ============================================================================
 Session::SendPendingDataScope::SendPendingDataScope(Session* session)
-    : session(session) {
+    : session(BaseObjectPtr<Session>(session)) {
   CHECK_NOT_NULL(session);
   CHECK(!session->is_destroyed());
   ++session->impl_->send_scope_depth_;
@@ -1773,7 +1773,7 @@ Session::SendPendingDataScope::SendPendingDataScope(Session* session)
 
 Session::SendPendingDataScope::SendPendingDataScope(
     const BaseObjectPtr<Session>& session)
-    : session(session.get()) {
+    : session(session) {
   CHECK_NOT_NULL(session);
   CHECK(!session->is_destroyed());
   ++session->impl_->send_scope_depth_;
@@ -1782,7 +1782,8 @@ Session::SendPendingDataScope::SendPendingDataScope(
 Session::SendPendingDataScope::~SendPendingDataScope() {
   if (session->is_destroyed()) return;
   DCHECK_GE(session->impl_->send_scope_depth_, 1);
-  Debug(session, "Send Scope Depth %zu", session->impl_->send_scope_depth_);
+  Debug(
+      session.get(), "Send Scope Depth %zu", session->impl_->send_scope_depth_);
   if (--session->impl_->send_scope_depth_ == 0 &&
       session->impl_->application_ && !session->impl_->handshake_deferred_) {
     session->SendPendingData();

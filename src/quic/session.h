@@ -364,7 +364,7 @@ class Session final : public AsyncWrap, private SessionTicket::AppData::Source {
   // exits. Scopes can be nested. When nested, pending data will be sent
   // only when the outermost scope is exited.
   struct SendPendingDataScope final {
-    Session* session;
+    BaseObjectPtr<Session> session;
     explicit SendPendingDataScope(Session* session);
     explicit SendPendingDataScope(const BaseObjectPtr<Session>& session);
     ~SendPendingDataScope();
